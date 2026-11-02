@@ -1,0 +1,113 @@
+{
+  "scenarios": {
+    "ip": {
+      "after_country": "US",
+      "before_country": "US",
+      "claude_stopped_event": true,
+      "event_kind": "exit_ip_changed",
+      "event_latency_seconds": 4.008,
+      "exit_ip_changed": true,
+      "monitor_stop_verified": true,
+      "node_fingerprint_unchanged": true,
+      "notification": {
+        "alert_setting": "enabled",
+        "authorization": "authorized",
+        "banner_eligible": true,
+        "delivery_state": "observed_in_notification_center",
+        "event_matches": true,
+        "notification_center_observed": true,
+        "visible_banner_requires_visual_confirmation": false,
+        "visible_banner_confirmed": true,
+        "visual_confirmation_method": "visible_banner_screenshot"
+      },
+      "passed": true,
+      "process_zero_observed_seconds": 4.098,
+      "real_claude_processes_zero": true,
+      "recorded_at": 1793601920.618807,
+      "scenario": "ip"
+    },
+    "node": {
+      "claude_stopped_event": true,
+      "event_kind": "node_changed",
+      "event_latency_seconds": 1.477,
+      "monitor_stop_verified": true,
+      "node_fingerprint_changed": true,
+      "notification": {
+        "alert_setting": "enabled",
+        "authorization": "authorized",
+        "banner_eligible": true,
+        "delivery_state": "observed_in_notification_center",
+        "event_matches": true,
+        "notification_center_observed": true,
+        "visible_banner_requires_visual_confirmation": false,
+        "visible_banner_confirmed": true,
+        "visual_confirmation_method": "visible_notification_accessibility_tree"
+      },
+      "passed": true,
+      "process_zero_observed_seconds": 1.508,
+      "real_claude_processes_zero": true,
+      "recorded_at": 1793601846.066838,
+      "scenario": "node"
+    },
+    "restore": {
+      "cleanup_stopped_remaining_claude": false,
+      "dns_payload_restored": true,
+      "dns_runtime_restored": null,
+      "dns_runtime_visible": false,
+      "fixture_stopped": true,
+      "original_selection_restored": true,
+      "passed": true,
+      "recorded_at": 1793601929.397238,
+      "rules_restored": true,
+      "scenario": "restore",
+      "source_files_unchanged": true,
+      "test_node_removed": true,
+      "tun_restored": true
+    },
+    "setup": {
+      "claude_started": false,
+      "dns_payload_unchanged": true,
+      "original_selection_retained": true,
+      "passed": true,
+      "recorded_at": 1793601827.978606,
+      "restore_available": true,
+      "rules_count": 51,
+      "rules_unchanged": true,
+      "runtime_only_test_node_added": true,
+      "source_files_unchanged": true
+    },
+    "vpn_idle": {
+      "application_stop_tested": false,
+      "auto_restore_completed": true,
+      "claude_launched": false,
+      "event_kind": "vpn_disconnected",
+      "event_latency_seconds": 0.396,
+      "monitor_ready_after_restore": true,
+      "no_claude_processes": true,
+      "notification": {
+        "alert_setting": "enabled",
+        "authorization": "authorized",
+        "banner_eligible": true,
+        "delivery_state": "observed_in_notification_center",
+        "event_matches": true,
+        "notification_center_observed": true,
+        "visible_banner_requires_visual_confirmation": true
+      },
+      "passed": true,
+      "recorded_at": 1793602034.644597,
+      "scenario": "vpn_idle",
+      "tun_restored": true,
+      "user_requested_no_further_launch": true
+    }
+  },
+  "schema": 1,
+  "verification_scope": {
+    "protected_application": "Claude Desktop /Applications/Claude.app",
+    "claude_code_launched": false,
+    "no_further_real_launch_requested": true,
+    "vpn_process_termination_tested": false,
+    "all_configuration_restored": true,
+    "timezone_for_date": "UTC",
+    "verified_at": "2026-11-02T06:50:44Z"
+  }
+}

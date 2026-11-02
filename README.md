@@ -58,3 +58,11 @@ Clash 按请求的目标域名/IP 分流，不能仅因请求来自 IP 检测网
 三条端口规则覆盖常见 STUN，不代表阻断所有 WebRTC/TURN 变体。fake-IP 或 STUN 无响应本身不证明全部流量零泄漏。本机验证范围是 macOS + Clash Verge/Mihomo，其他客户端需自行验证。
 
 此前“全部公网代理”的版本已被本次国内直连策略替代。不会通过关闭检查或删除历史记录来制造通过结果。
+
+## macOS 持续监控与通知
+
+[完整 ClaudeSwitcher 定制源码](claude-switcher/README.md)（`1.8.0-rc1.local3`）已补齐 VPN、节点及出口 IP 变化监控，并发送原生系统通知。保护对象是 `/Applications/Claude.app` 桌面版，未增加 Claude Code CLI 进程管理。
+
+节点/VPN 每秒巡检；出口 IP 每 5 秒经明确代理探测，连续 20 秒无有效结果则停止桌面版 Claude。通知与进程停止分离，通知权限关闭不影响守护执行；停止失败会重试并拒绝恢复就绪。监控不会自动启动 Claude。
+
+参见 [监控机制与安装说明](claude-switcher/docs/network/MONITOR.md)、[实际验收结果](docs/VERIFICATION.md) 和 [脱敏监控证据](docs/monitor-evidence.json)。原 51 条国内直连分流表保持不变。

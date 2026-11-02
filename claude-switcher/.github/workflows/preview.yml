@@ -1,0 +1,48 @@
+name: candidate-artifacts
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    uses: ./.github/workflows/checks.yml
+
+  artifacts:
+    needs: verify
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [arm64, x86_64, universal]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build verified candidate (ad-hoc, not notarized)
+        env:
+          CLAUDE_SWITCHER_BUILD_ARCH: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          bash scripts/package-macos.sh "$(cat VERSION)"
+          lipo -info build/Claude切换器.app/Contents/MacOS/ClaudeSwitcher
+          codesign --verify --deep --strict build/Claude切换器.app
+          (cd build && shasum -a 256 *.zip *.dmg > SHA256SUMS-artifacts.txt)
+      - name: Upload reviewable artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeSwitcher-${{ matrix.architecture }}-${{ github.sha }}
+          path: |
+            build/*.zip
+            build/*.dmg
+            build/SHA256SUMS-artifacts.txt
+          retention-days: 14
+          if-no-files-found: error
