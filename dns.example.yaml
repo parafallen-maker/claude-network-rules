@@ -1,0 +1,31 @@
+# Optional DNS fragment. Merge via Clash Verge DNS settings, not as a subscription.
+# Requires the same existing proxy group as the routing script.
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  respect-rules: true
+  prefer-h3: false
+  nameserver:
+    - "https://1.1.1.1/dns-query#🤖 Claude"
+  direct-nameserver:
+    - "https://1.1.1.1/dns-query#🤖 Claude"
+  direct-nameserver-follow-policy: false
+  default-nameserver:
+    - "https://1.1.1.1/dns-query#DIRECT"
+    - "https://8.8.8.8/dns-query#DIRECT"
+  proxy-server-nameserver:
+    - "https://1.1.1.1/dns-query#DIRECT"
+    - "https://8.8.8.8/dns-query#DIRECT"
+  fallback: []
+  nameserver-policy: {}
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "*.arpa"
+    - "time.*.com"
+    - "ntp.*.com"
+    - "localhost.ptlogin2.qq.com"
+    - "*.msftncsi.com"
+    - "www.msftconnecttest.com"

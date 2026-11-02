@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+.env
+.env.*
+private/
+backups/
+*.bak*
+config.yaml
+clash-verge.yaml
+profiles/
+*.log

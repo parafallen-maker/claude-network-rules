@@ -1,0 +1,51 @@
+{
+  "claude.ai": {
+    "actual": "PROXY",
+    "expected": "PROXY",
+    "rule": "DomainSuffix",
+    "payload": "claude.ai",
+    "passed": true
+  },
+  "ping0.cc": {
+    "actual": "PROXY",
+    "expected": "PROXY",
+    "rule": "DomainSuffix",
+    "payload": "ping0.cc",
+    "passed": true
+  },
+  "github.com": {
+    "actual": "PROXY",
+    "expected": "PROXY",
+    "rule": "Match",
+    "payload": "",
+    "passed": true
+  },
+  "www.qq.com": {
+    "actual": "DIRECT",
+    "expected": "DIRECT",
+    "rule": "GeoSite",
+    "payload": "cn",
+    "passed": true
+  },
+  "cip.cc": {
+    "actual": "PROXY",
+    "expected": "PROXY",
+    "rule": "DomainSuffix",
+    "payload": "cip.cc",
+    "passed": true
+  },
+  "www.bilibili.com": {
+    "actual": "DIRECT",
+    "expected": "DIRECT",
+    "rule": "GeoSite",
+    "payload": "cn",
+    "passed": true
+  },
+  "www.baidu.com": {
+    "actual": "DIRECT",
+    "expected": "DIRECT",
+    "rule": "GeoSite",
+    "payload": "cn",
+    "passed": true
+  }
+}
