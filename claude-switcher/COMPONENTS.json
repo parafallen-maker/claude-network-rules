@@ -13,7 +13,7 @@
     "core/account_state.py": "43dc4abaa91dd750306371b085558284460a6fcdf36942541df0ea49096c15dc",
     "core/audit-contract.py": "97f0243c84e7768da7ee6ff2d8144bf6c93f279284eb6616c14d3b5ef0c1aa4e",
     "core/browser-proxy.py": "07a231d95d4d7c700832c37f21ea887ea47d5eaf53289fc045be1f4c12811412",
-    "core/clash-policy.py": "2ce2b71a078607e77c5c2ab6effd23ed744b481a33b87f97fc04630b97180aff",
+    "core/clash-policy.py": "73eda0809f5da81c3576adf4f384798639871545994cf06c8d796a1cab9025c2",
     "core/claude-switch.sh": "936a3ec9712cd29250fb3836bd3bc93ff9fc811567f2a22b671b9d16d976e266",
     "core/component-manager.py": "0374b101dc191b2741ef511757db4e3fd045f27a57bf13b03431faaf55d56395",
     "core/environment-config.py": "e82f8b5bf0c34db46aefbda00ff5338a09a8bb592e072da9d9cf202352997d5f",

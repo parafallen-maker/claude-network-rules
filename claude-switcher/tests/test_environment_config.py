@@ -101,7 +101,7 @@ class EnvironmentTests(unittest.TestCase):
         source = m.policy.script_text(self.script, 'test-proxy', 'reject', self.options)
         js = source + '''
 const assert = require('assert');
-const config = {rules:['MATCH,DIRECT'],proxies:[{name:'node-a',type:'ss'},{name:'direct',type:'direct'}],dns:{listen:'127.0.0.1:1053','nameserver-policy':{'example.com':'system'}}};
+const config = {rules:['MATCH,DIRECT'],proxies:[{name:'node-a',type:'ss'},{name:'direct',type:'direct'}],dns:{listen:'127.0.0.1:1053','nameserver-policy':{'example.com':'system'},'direct-nameserver':['https://1.1.1.1/dns-query#test-proxy']}};
 const first=main(config);
 assert.equal(first.custom,42); assert.equal(first.rules.length,69);
 assert.deepEqual(first['proxy-groups'][0].proxies,['REJECT','node-a']);
@@ -109,9 +109,11 @@ assert.equal(first.listeners[0].listen,'127.0.0.1');
 assert.equal(first.dns.nameserver[0],'https://1.1.1.1/dns-query#test-proxy');
 assert.deepEqual(first.dns['nameserver-policy'],{});
 assert.equal(first.dns.listen,'127.0.0.1:1053');
+assert.deepEqual(first.dns['direct-nameserver'],config.dns['direct-nameserver']);
 const existing={name:'test-proxy',type:'select',proxies:['node-b']};
 const second=main({'proxy-groups':[existing],'proxy-providers':{provider:{type:'http'}}});
 assert.strictEqual(second['proxy-groups'][0],existing);
+assert(!Object.hasOwn(second.dns,'direct-nameserver'));
 const third=main({'proxy-providers':{provider:{type:'http'}}});
 assert.deepEqual(third['proxy-groups'][0].use,['provider']);
 assert.deepEqual(third['proxy-groups'][0].proxies,['REJECT']);

@@ -337,7 +337,7 @@ def environment_block(group, options):
       if (typeof dns !== "object" || Array.isArray(dns)) throw new Error("claude-switcher: invalid DNS");
       result.dns = {...dns, enable:true, "enhanced-mode":"fake-ip", "respect-rules":true,
         nameserver:["https://1.1.1.1/dns-query#" + group], "nameserver-policy":{}, fallback:[],
-        "direct-nameserver":[], "proxy-server-nameserver": dns["proxy-server-nameserver"] && dns["proxy-server-nameserver"].length ? dns["proxy-server-nameserver"] : ["https://1.1.1.1/dns-query"]};
+        "proxy-server-nameserver": dns["proxy-server-nameserver"] && dns["proxy-server-nameserver"].length ? dns["proxy-server-nameserver"] : ["https://1.1.1.1/dns-query"]};
     }
     """ % encoded
 
