@@ -183,6 +183,11 @@ def generated_fields(clash, options):
             required = {'enable': True, 'enhanced-mode': 'fake-ip', 'respect-rules': True,
                         'nameserver': ['https://1.1.1.1/dns-query#' + options['proxy_group']],
                         'nameserver-policy': {}, 'fallback': [], 'direct-nameserver': []}
+            # Verge's DNS override can fill direct-nameserver after the global
+            # script. Empty means inherit nameserver; the identical proxied DoH
+            # endpoint is equivalent. Any other resolver remains a mismatch.
+            if fields.get('direct-nameserver') == required['nameserver']:
+                fields['direct-nameserver'] = []
             if fields != required:
                 return False
         lines = section(text, 'listeners')
