@@ -320,6 +320,7 @@ class InstallerLauncherTests(unittest.TestCase):
             startup = root / 'startup.sh'
             startup.write_text('''function [() {
     if [[ "$1" == -d && "$2" == /Applications/Claude.app ]]; then return 0; fi
+    if [[ "$1" == '!' && "$2" == -d && "$3" == /Applications/Claude.app ]]; then return 1; fi
     if [[ "$1" == -d && "$2" == *io.github.clash-verge-rev.clash-verge-rev ]]; then return 1; fi
     if [[ "$1" == -d && "$2" == *com.follow.clash ]]; then return 0; fi
     builtin [ "$@"
@@ -330,10 +331,10 @@ command() {
 }
 ''')
             environment = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ.get('PATH', ''),
-                               BASH_ENV=str(startup), INSTALL_CAPTURE=str(capture), INSTALL_COMPILER_CHECK=str(compiler))
+                               BASH_ENV=str(startup), HOME=str(root/'home'), INSTALL_CAPTURE=str(capture), INSTALL_COMPILER_CHECK=str(compiler))
             result = subprocess.run(['/bin/bash', str(script)], env=environment, input='', text=True, capture_output=True, timeout=15)
             if embedded:
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertFalse(compiler.exists())
                 arguments = json.loads(capture.read_text())
                 self.assertEqual(arguments[arguments.index('--prebuilt-app') + 1], str(app))
