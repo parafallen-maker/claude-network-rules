@@ -134,6 +134,20 @@ def restore_system(state, applied=None):
             run(["/usr/sbin/networksetup", modes[mode], service])
 
 
+def preserved_watchdog_timezone(config, active):
+    if config['configure_system'] or 'local.tz-watchdog' not in active:
+        return config['timezone']
+    # A rules-only upgrade must preserve the root-owned watchdog's configured
+    # target, not adopt a transient OS timezone or systemsetup's display value.
+    path = SYSTEM / 'tz-watchdog.sh'
+    if path.is_symlink() or not path.is_file():
+        raise cm.ComponentError('无法保留已安装时区看门狗目标')
+    match = re.search(r'^TARGET="([A-Za-z_]+/[A-Za-z_]+(?:/[A-Za-z_]+)?)"$', path.read_text(), re.M)
+    if not match:
+        raise cm.ComponentError('已安装时区看门狗目标格式无效；现有组件未修改')
+    return match.group(1)
+
+
 def root_apply(args):
     if os.geteuid() != 0:
         raise cm.ComponentError("系统安装需要管理员授权")
@@ -183,12 +197,7 @@ def root_apply(args):
     try:
         for label in LABELS:
             run(["/bin/launchctl", "bootout", "system/" + label], allow_failure=True)
-        watchdog_tz = config["timezone"]
-        if not config["configure_system"] and "local.tz-watchdog" in active:
-            current_tz = read_text(["/usr/sbin/systemsetup", "-gettimezone"])
-            if not current_tz or not current_tz.startswith("Time Zone: "):
-                raise cm.ComponentError("无法保留已安装时区看门狗的当前目标")
-            watchdog_tz = current_tz.split(": ", 1)[1]
+        watchdog_tz = preserved_watchdog_timezone(config, active)
         for name in ("claude-bodyguard.sh", "tz-watchdog.sh"):
             content = (source / "daemons" / name).read_text()
             # Shell-safe placeholders: templates contain a quoted HOME and scalar target.
@@ -451,7 +460,9 @@ def notifier_agent(home, start=False):
 def wait_for_monitor(home, mode, group, country):
     if mode not in ("clash-verge", "flclash"):
         return
-    deadline = time.monotonic() + 25
+    # Clash Verge may need about a minute to bring its controller back after
+    # a full restart. Keep all readiness/freshness checks while allowing startup.
+    deadline = time.monotonic() + 90
     started = time.time()
     while time.monotonic() < deadline:
         result = run(["/usr/bin/python3", SYSTEM / "network-monitor.py", "status", "--owner-uid", str(home.stat().st_uid),

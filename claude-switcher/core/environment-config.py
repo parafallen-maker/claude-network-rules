@@ -288,7 +288,7 @@ def activate(clash, base, options):
 
 
 def changes(options):
-    rows = ['全局脚本统一使用 51 条分流规则：国内及局域网直连，Claude/IP 检测及其余流量代理。']
+    rows = [f'全局脚本统一使用 {len(policy.expected_rules())} 条分流规则：国内及局域网直连，Claude/IP 检测及其余流量代理。']
     if options['auto_group']:
         rows.append('订阅缺少安装时的代理组时自动创建；初始选择 REJECT，须自行选择节点。')
     if options['configure_dns']:

@@ -1,13 +1,19 @@
 {
-  "schema": 1,
-  "name": "Claude 与 IP 检测 · 国内直连规则 v2",
+  "schema": 2,
+  "name": "Claude 与 IP 检测 · 国内直连规则 v3",
   "claude_domains": [
     "anthropic.com",
     "claude.ai",
     "claude.com",
     "claude.app",
     "claudeusercontent.com",
-    "claudemcpcontent.com"
+    "claudemcpcontent.com",
+    "clau.de",
+    "claudemcpclient.com",
+    "sentry.io",
+    "statsigapi.net",
+    "intercom.io",
+    "intercomcdn.com"
   ],
   "ip_check_domains": [
     "ippure.com",
@@ -40,7 +46,8 @@
     "ip2location.com",
     "browserscan.net",
     "whoer.net",
-    "ip.skk.moe"
+    "ip.skk.moe",
+    "net.coffee"
   ],
   "local_cidrs": [
     "127.0.0.0/8",
@@ -52,5 +59,22 @@
     "fc00::/7",
     "fe80::/10"
   ],
-  "china_direct": true
+  "china_direct": true,
+  "claude_exact_domains": [
+    "servd-anthropic-website.b-cdn.net",
+    "anthropic.com.cdn.cloudflare.net",
+    "anthropic.auth0.com",
+    "anthropic-com.ghost.io",
+    "browser-intake-us5-datadoghq.com",
+    "cdn.usefathom.com"
+  ],
+  "claude_domain_keywords": [
+    "datadog",
+    "sentry",
+    "sift"
+  ],
+  "claude_ip_cidrs": [
+    "160.79.104.0/23",
+    "2607:6bc0::/48"
+  ]
 }

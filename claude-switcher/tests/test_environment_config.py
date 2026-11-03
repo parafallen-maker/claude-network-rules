@@ -103,7 +103,7 @@ class EnvironmentTests(unittest.TestCase):
 const assert = require('assert');
 const config = {rules:['MATCH,DIRECT'],proxies:[{name:'node-a',type:'ss'},{name:'direct',type:'direct'}],dns:{listen:'127.0.0.1:1053','nameserver-policy':{'example.com':'system'}}};
 const first=main(config);
-assert.equal(first.custom,42); assert.equal(first.rules.length,51);
+assert.equal(first.custom,42); assert.equal(first.rules.length,69);
 assert.deepEqual(first['proxy-groups'][0].proxies,['REJECT','node-a']);
 assert.equal(first.listeners[0].listen,'127.0.0.1');
 assert.equal(first.dns.nameserver[0],'https://1.1.1.1/dns-query#test-proxy');

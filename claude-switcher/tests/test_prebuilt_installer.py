@@ -72,6 +72,50 @@ def fixture_app(source, app):
         'version': VERSION, 'components_sha256': installer.cm.digest(source / 'COMPONENTS.json')}))
 
 
+class PreservedTimezoneTests(unittest.TestCase):
+    def test_rules_upgrade_keeps_existing_watchdog_target(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(installer, 'SYSTEM', Path(tmp)), mock.patch.object(installer, 'read_text') as read_os:
+            (Path(tmp)/'tz-watchdog.sh').write_text('TARGET="America/New_York"\n')
+            config = dict(configure_system=False, timezone='Asia/Tokyo')
+            self.assertEqual(installer.preserved_watchdog_timezone(config, ['local.tz-watchdog']), 'America/New_York')
+            read_os.assert_not_called()
+            config['configure_system'] = True
+            self.assertEqual(installer.preserved_watchdog_timezone(config, ['local.tz-watchdog']), 'Asia/Tokyo')
+
+    def test_unknown_existing_target_cannot_be_silently_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(installer, 'SYSTEM', Path(tmp)):
+            (Path(tmp)/'tz-watchdog.sh').write_text('TARGET="unknown"\n')
+            with self.assertRaises(installer.cm.ComponentError):
+                installer.preserved_watchdog_timezone(dict(configure_system=False, timezone='America/New_York'), ['local.tz-watchdog'])
+
+
+class MonitorStartupTests(unittest.TestCase):
+    def wait_with_clock(self, ready_after):
+        elapsed = [0.0]
+        calls = []
+        def advance(seconds):
+            elapsed[0] += seconds
+        def status(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0 if elapsed[0] >= ready_after else 1)
+        with mock.patch.object(installer.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                mock.patch.object(installer.time, 'time', return_value=1234.0), \
+                mock.patch.object(installer.time, 'sleep', side_effect=advance), \
+                mock.patch.object(installer, 'run', side_effect=status):
+            installer.wait_for_monitor(ROOT, 'clash-verge', 'test-proxy', 'US')
+        return elapsed[0], calls
+
+    def test_slow_proxy_startup_still_requires_fresh_monitor_success(self):
+        elapsed, calls = self.wait_with_clock(55)
+        self.assertEqual(elapsed, 55)
+        self.assertTrue(all(args[-2:] == ['--min-heartbeat', '1234.0'] for args in calls))
+        self.assertTrue(all('--expected-country' in args for args in calls))
+
+    def test_unready_monitor_is_not_accepted_after_timeout(self):
+        with self.assertRaises(installer.cm.ComponentError):
+            self.wait_with_clock(1000)
+
+
 class PrebuiltInstallerTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

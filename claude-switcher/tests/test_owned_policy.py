@@ -22,6 +22,9 @@ class OwnedPolicyTest(unittest.TestCase):
             typ, payload, proxy = {
                 'port': ('AND', f'((Network,udp) && (DstPort,{value}))', 'REJECT'),
                 'domain': ('DomainSuffix', value, 'test-proxy'),
+                'exact': ('Domain', value, 'test-proxy'),
+                'keyword': ('DomainKeyword', value, 'test-proxy'),
+                'proxy_cidr': ('IPCIDR', value, 'test-proxy'),
                 'cidr': ('IPCIDR', value, 'DIRECT'),
                 'match': ('Match', '', 'test-proxy'),
                 'geosite': ('GeoSite', value, 'DIRECT'),
@@ -41,7 +44,7 @@ class OwnedPolicyTest(unittest.TestCase):
             self.verify()
 
     def test_exact_table_passes(self):
-        self.assertEqual(len(self.verify()['rules']['rules']), 51)
+        self.assertEqual(len(self.verify()['rules']['rules']), 69)
 
     def test_extra_direct_rejected(self):
         self.rules.insert(-1, dict(type='DomainSuffix', payload='example.com', proxy='DIRECT'))
@@ -81,6 +84,44 @@ class OwnedPolicyTest(unittest.TestCase):
         with patch.object(Path, 'read_text', return_value=json.dumps(value)), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             m.rule_strings('test-proxy', 'reject')
 
+    def test_exact_keyword_and_public_ip_rules_cannot_be_redirected(self):
+        for kind in ('exact', 'keyword', 'proxy_cidr'):
+            with self.subTest(kind=kind):
+                index = next(i for i, rule in enumerate(m.expected_rules()) if rule[0] == kind)
+                self.rules[index]['proxy'] = 'DIRECT'
+                self.rejects()
+                self.rules[index]['proxy'] = 'test-proxy'
+
+    def test_exact_domain_must_not_be_expanded_to_suffix(self):
+        index = next(i for i, rule in enumerate(m.expected_rules()) if rule[0] == 'exact')
+        self.rules[index]['type'] = 'DomainSuffix'
+        self.rejects()
+
+    def test_proxy_cidrs_cannot_capture_private_or_default_routes(self):
+        data = json.loads((ROOT/'core/owned-policy.json').read_text())
+        for cidr in ('0.0.0.0/0', '::/0', '192.168.0.0/16', '127.0.0.0/8', '160.79.104.1/23'):
+            with self.subTest(cidr=cidr):
+                data['claude_ip_cidrs'] = [cidr]
+                with patch.object(Path, 'read_text', return_value=json.dumps(data)), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    m.rule_strings('test-proxy', 'reject')
+
+    def test_rule_data_and_portable_generator_agree(self):
+        repo = ROOT.parent
+        if not (repo/'owned-policy.json').exists():
+            self.skipTest('standalone app source does not contain the portable generator')
+        self.assertEqual((repo/'owned-policy.json').read_bytes(), (ROOT/'core/owned-policy.json').read_bytes())
+        spec = importlib.util.spec_from_file_location('portable_rules', repo/'scripts/generate.py')
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        for stun in ('reject', 'proxy'):
+            files, count = generator.build('test-proxy', stun)
+            rules = [json.loads(row[4:]) for row in files['rules.yaml'].splitlines() if row.startswith('  - ')]
+            self.assertEqual(rules, m.rule_strings('test-proxy', stun))
+            self.assertEqual(count, len(m.expected_rules()))
+        for group in ('DIRECT', 'REJECT', 'GLOBAL', 'PASS', 'bad,group', 'bad\ngroup'):
+            with self.assertRaises(ValueError):
+                generator.build(group, 'reject')
+
     def test_script_replaces_routes_preserves_other_settings_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'Script.js'
@@ -92,7 +133,7 @@ class OwnedPolicyTest(unittest.TestCase):
 const config = {mode:'global',rules:['MATCH,DIRECT'],dns:{enable:true},'proxy-groups':[{name:'test-proxy'}]};
 const result = main(config);
 assert.equal(result.extra,42);assert.deepEqual(result.dns,{enable:true});
-assert.equal(result.mode,'rule');assert.equal(result.rules.length,51);
+assert.equal(result.mode,'rule');assert.equal(result.rules.length,69);
 assert.equal(result.rules.at(-1),'MATCH,test-proxy');assert(!result.rules.includes('MATCH,DIRECT'));
 '''
             subprocess.run(['node', '-e', js], check=True, capture_output=True)

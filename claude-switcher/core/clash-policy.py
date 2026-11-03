@@ -35,25 +35,46 @@ def owned_policy():
     if path.is_symlink() or path.stat().st_size > 32768:
         fail("自有规则文件不安全或过大")
     value = json.loads(path.read_text())
-    if (not isinstance(value, dict) or value.get("schema") != 1
-            or set(value) != {"schema", "name", "claude_domains", "ip_check_domains", "local_cidrs", "china_direct"}
+    base_keys = {"schema", "name", "claude_domains", "ip_check_domains", "local_cidrs", "china_direct"}
+    extra_keys = {"claude_exact_domains", "claude_domain_keywords", "claude_ip_cidrs"}
+    if (not isinstance(value, dict) or value.get("schema") not in (1, 2)
+            or set(value) != (base_keys if value["schema"] == 1 else base_keys | extra_keys)
             or value.get("china_direct") is not True):
         fail("自有规则文件格式无效")
+    for key in extra_keys:
+        value.setdefault(key, [])
     domains = []
-    for key in ("claude_domains", "ip_check_domains"):
+    for key in ("claude_domains", "ip_check_domains", "claude_exact_domains"):
         items = value[key]
-        if not isinstance(items, list) or not 1 <= len(items) <= 128:
+        if not isinstance(items, list) or len(items) > 128 or (key != "claude_exact_domains" and not items):
             fail("自有域名列表无效")
         for domain in items:
             if not isinstance(domain, str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+", domain):
                 fail("自有规则包含无效域名")
         domains.extend(items)
+    keywords = value["claude_domain_keywords"]
+    if (not isinstance(keywords, list) or len(keywords) > 16
+            or any(not isinstance(k, str) or not re.fullmatch(r"[a-z][a-z0-9-]{2,31}", k) for k in keywords)
+            or len(set(keywords)) != len(keywords)):
+        fail("自有域名关键词无效")
+    proxy_cidrs = value["claude_ip_cidrs"]
+    if not isinstance(proxy_cidrs, list) or len(proxy_cidrs) > 32:
+        fail("代理网段无效")
+    for cidr in proxy_cidrs:
+        try:
+            network = ipaddress.ip_network(cidr, strict=True) if isinstance(cidr, str) else None
+            valid = (network is not None and str(network) == cidr and network.is_global
+                     and network.prefixlen >= (8 if network.version == 4 else 16))
+        except ValueError:
+            valid = False
+        if not valid:
+            fail("代理网段必须是规范的公网范围")
     cidrs = value["local_cidrs"]
     if (len(set(domains)) != len(domains) or not isinstance(cidrs, list)
             or any(not isinstance(cidr, str) or cidr not in LOCAL_CIDRS for cidr in cidrs)
-            or len(set(cidrs)) != len(cidrs)):
+            or len(set(cidrs)) != len(cidrs) or len(set(proxy_cidrs)) != len(proxy_cidrs)):
         fail("自有规则重复或包含非局域网直连范围")
-    return domains, cidrs
+    return value
 
 
 def read_yaml_scalar(path, key):
@@ -196,10 +217,13 @@ def norm(value):
 
 
 def expected_rules():
-    domains, cidrs = owned_policy()
+    data = owned_policy()
     rules = [("port", p) for p in PORTS]
-    rules.extend(("domain", d) for d in domains)
-    rules.extend(("cidr", c) for c in cidrs)
+    rules.extend(("domain", d) for d in data["claude_domains"] + data["ip_check_domains"])
+    rules.extend(("exact", d) for d in data["claude_exact_domains"])
+    rules.extend(("keyword", d) for d in data["claude_domain_keywords"])
+    rules.extend(("proxy_cidr", c) for c in data["claude_ip_cidrs"])
+    rules.extend(("cidr", c) for c in data["local_cidrs"])
     rules.extend((("geosite", "cn"), ("geoip", "cn")))
     rules.append(("match", ""))
     return rules
@@ -235,10 +259,10 @@ def verify_runtime(clash_dir, group, policy, allow_plain_ports=False, require_no
                     or rule.get("proxy") != target
                     or (rule.get("extra") or {}).get("disabled") is True):
                 fail("运行规则未按策略置顶:UDP/" + str(value))
-        elif kind == "domain":
+        elif kind in {"domain", "exact", "keyword"}:
             rule = rules[index]
             if (not isinstance(rule, dict)
-                    or str(rule.get("type", "")).upper().replace("_", "-") not in {"DOMAIN-SUFFIX", "DOMAINSUFFIX"}
+                    or norm(rule.get("type", "")) != {"domain":"DOMAINSUFFIX", "exact":"DOMAIN", "keyword":"DOMAINKEYWORD"}[kind]
                     or str(rule.get("payload", "")).strip().lower() != value
                     or rule.get("proxy") != group
                     or (rule.get("extra") or {}).get("disabled") is True):
@@ -255,18 +279,21 @@ def verify_runtime(clash_dir, group, policy, allow_plain_ports=False, require_no
             allowed_types = {"MATCH"} if kind == "match" else ({"IPCIDR6", "IPCIDR"} if ":" in value else {"IPCIDR"})
             if (not isinstance(rule, dict) or norm(rule.get("type", "")) not in allowed_types
                     or str(rule.get("payload", "")) != value
-                    or rule.get("proxy") != (group if kind == "match" else "DIRECT")
+                    or rule.get("proxy") != (group if kind in {"match", "proxy_cidr"} else "DIRECT")
                     or (rule.get("extra") or {}).get("disabled") is True):
-                fail("运行规则与自有规则不一致:局域网/最终代理")
+                fail("运行规则与自有规则不一致:网段/最终代理")
     return state
 
 
 def rule_strings(group, policy):
-    domains, cidrs = owned_policy()
+    data = owned_policy()
     target = "REJECT" if policy == "reject" else group
     return ([f"AND,((NETWORK,UDP),(DST-PORT,{port})),{target}" for port in PORTS] +
-            [f"DOMAIN-SUFFIX,{domain},{group}" for domain in domains] +
-            [f"{'IP-CIDR6' if ':' in cidr else 'IP-CIDR'},{cidr},DIRECT,no-resolve" for cidr in cidrs] +
+            [f"DOMAIN-SUFFIX,{domain},{group}" for domain in data["claude_domains"] + data["ip_check_domains"]] +
+            [f"DOMAIN,{domain},{group}" for domain in data["claude_exact_domains"]] +
+            [f"DOMAIN-KEYWORD,{word},{group}" for word in data["claude_domain_keywords"]] +
+            [f"{'IP-CIDR6' if ':' in cidr else 'IP-CIDR'},{cidr},{group},no-resolve" for cidr in data["claude_ip_cidrs"]] +
+            [f"{'IP-CIDR6' if ':' in cidr else 'IP-CIDR'},{cidr},DIRECT,no-resolve" for cidr in data["local_cidrs"]] +
             ["GEOSITE,cn,DIRECT", "GEOIP,CN,DIRECT"] +
             [f"MATCH,{group}"])
 

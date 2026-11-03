@@ -1,0 +1,72 @@
+{
+  "rules": 69,
+  "runtime_policy_verified": true,
+  "routing_samples": [
+    {
+      "destination": "www.baidu.com",
+      "connect_established": true,
+      "connection_observed": true,
+      "rule": "GeoSite",
+      "direct": true,
+      "installed_proxy_group": false,
+      "expected_route_verified": true
+    },
+    {
+      "destination": "ip.net.coffee",
+      "connect_established": true,
+      "connection_observed": true,
+      "rule": "DomainSuffix",
+      "direct": false,
+      "installed_proxy_group": true,
+      "expected_route_verified": true
+    },
+    {
+      "destination": "browser-intake-us5-datadoghq.com",
+      "connect_established": true,
+      "connection_observed": true,
+      "rule": "Domain",
+      "direct": false,
+      "installed_proxy_group": true,
+      "expected_route_verified": true
+    },
+    {
+      "destination": "api.datadoghq.com",
+      "connect_established": true,
+      "connection_observed": true,
+      "rule": "DomainKeyword",
+      "direct": false,
+      "installed_proxy_group": true,
+      "expected_route_verified": true
+    },
+    {
+      "destination": "160.79.104.10",
+      "connect_established": true,
+      "connection_observed": true,
+      "rule": "IPCIDR",
+      "direct": false,
+      "installed_proxy_group": true,
+      "expected_route_verified": true
+    }
+  ],
+  "user_and_root_components_equal": true,
+  "root_components_not_user_writable": true,
+  "monitor_ready": true,
+  "monitor_heartbeat_fresh": true,
+  "audit": [
+    "代理内核=ok",
+    "TUN网卡=ok",
+    "出口IP=ok",
+    "IP一致=ok",
+    "时区=ok",
+    "地区=ok",
+    "IPv6=ok",
+    "DNS=warn",
+    "WebRTC=ok",
+    "保镖=ok",
+    "规则置顶=ok",
+    "客户端语言=ok",
+    "ASN属性=ok",
+    "生态可达性=ok"
+  ],
+  "pending_install_or_update": false
+}

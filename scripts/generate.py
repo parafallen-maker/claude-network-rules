@@ -2,6 +2,7 @@
 """Generate portable Mihomo/Clash Verge fragments without editing local settings."""
 import argparse
 import json
+import ipaddress
 import re
 from pathlib import Path
 
@@ -14,18 +15,32 @@ def build(group, stun):
     if not group or any(c in group for c in ",\r\n\x00") or group.upper() in {"DIRECT", "REJECT", "GLOBAL", "PASS"}:
         raise ValueError("group must be an existing proxy group")
     data = json.loads((ROOT / "owned-policy.json").read_text(encoding="utf-8"))
-    if data.get("schema") != 1 or data.get("china_direct") is not True:
+    if data.get("schema") != 2 or data.get("china_direct") is not True:
         raise ValueError("unsupported policy: domestic direct must be enabled")
     domains = data["claude_domains"] + data["ip_check_domains"]
-    if (not domains or len(domains) != len(set(domains)) or
-            any(not isinstance(d, str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+", d) for d in domains)):
+    all_domains = domains + data["claude_exact_domains"]
+    if (not domains or len(all_domains) != len(set(all_domains)) or
+            any(not isinstance(d, str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+", d) for d in all_domains)):
         raise ValueError("invalid or duplicate domain")
     local = data["local_cidrs"]
     if len(local) != len(set(local)) or any(c not in LOCAL for c in local):
         raise ValueError("DIRECT CIDRs must be private, loopback or link-local")
+    keywords = data["claude_domain_keywords"]
+    if len(set(keywords)) != len(keywords) or any(not isinstance(k, str) or not re.fullmatch(r"[a-z][a-z0-9-]{2,31}", k) for k in keywords):
+        raise ValueError("invalid keyword")
+    proxy_cidrs = data["claude_ip_cidrs"]
+    if len(set(proxy_cidrs)) != len(proxy_cidrs):
+        raise ValueError("duplicate proxy CIDR")
+    for cidr in proxy_cidrs:
+        network = ipaddress.ip_network(cidr, strict=True)
+        if str(network) != cidr or not network.is_global or network.prefixlen < (8 if network.version == 4 else 16):
+            raise ValueError("proxy CIDRs must be canonical public networks")
     target = "REJECT" if stun == "reject" else group
     rules = [f"AND,((NETWORK,UDP),(DST-PORT,{p})),{target}" for p in (3478, 5349, 19302)]
     rules += [f"DOMAIN-SUFFIX,{d},{group}" for d in domains]
+    rules += [f"DOMAIN,{d},{group}" for d in data["claude_exact_domains"]]
+    rules += [f"DOMAIN-KEYWORD,{word},{group}" for word in keywords]
+    rules += [f"{'IP-CIDR6' if ':' in c else 'IP-CIDR'},{c},{group},no-resolve" for c in proxy_cidrs]
     rules += [f"{'IP-CIDR6' if ':' in c else 'IP-CIDR'},{c},DIRECT,no-resolve" for c in local]
     # Resolve unmatched domain targets before the country-IP fallback.
     rules += ["GEOSITE,cn,DIRECT", "GEOIP,CN,DIRECT", f"MATCH,{group}"]

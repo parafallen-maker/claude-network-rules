@@ -1,0 +1,30 @@
+[
+  {
+    "subscription_index": 1,
+    "group_created": true,
+    "rules": 69,
+    "listeners": 1,
+    "native_config_valid": true
+  },
+  {
+    "subscription_index": 2,
+    "group_created": true,
+    "rules": 69,
+    "listeners": 1,
+    "native_config_valid": true
+  },
+  {
+    "subscription_index": 3,
+    "group_created": true,
+    "rules": 69,
+    "listeners": 1,
+    "native_config_valid": true
+  },
+  {
+    "subscription_index": 4,
+    "group_created": false,
+    "rules": 69,
+    "listeners": 1,
+    "native_config_valid": true
+  }
+]
