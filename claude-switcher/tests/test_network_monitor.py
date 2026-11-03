@@ -310,6 +310,122 @@ class ProcessTest(unittest.TestCase):
 
 
 class MonitorLoopTest(unittest.TestCase):
+    def run_polls(self, snapshots, times, samples=(), stop_result=None):
+        """Run real event routing while replacing every external side effect."""
+        clock = {'index': 0}
+        samples = iter(samples)
+        statuses, events, logs, stop_calls = [], [], [], []
+
+        class EndPolls(Exception):
+            pass
+
+        def now():
+            return times[clock['index']]
+
+        def sleep(_):
+            clock['index'] += 1
+            if clock['index'] == len(times):
+                raise EndPolls()
+
+        def stop(_):
+            index = clock['index']
+            attempt = stop_calls.count(index)
+            stop_calls.append(index)
+            return stop_result(index, attempt) if stop_result else (False, False)
+
+        def submit(function, port):
+            self.assertIs(function, m.exit_sample)
+            self.assertEqual(port, 17890)
+            value = next(samples, None)
+            return SimpleNamespace(done=lambda: True, result=lambda: value)
+
+        def write(path, value, mode):
+            if path.name.startswith('status-'):
+                statuses.append(copy.deepcopy(value))
+            elif path.name.startswith('events-'):
+                events.append(copy.deepcopy(value['latest']))
+
+        def log(command, **kwargs):
+            self.assertEqual(command[:3], ['/usr/bin/logger', '-t', 'claude-switcher'])
+            logs.append(command[-1])
+            return SimpleNamespace(returncode=0)
+
+        pool = SimpleNamespace(submit=submit, shutdown=lambda **kwargs: None)
+        patches = [
+            patch.object(m.os, 'geteuid', return_value=0),
+            patch.object(m.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir='/Users/test-owner')),
+            patch.object(m, 'secure_directory'), patch.object(m.os, 'open', return_value=12345),
+            patch.object(m.os, 'close'), patch.object(m.fcntl, 'flock'),
+            patch.object(m, 'read_root_json', side_effect=FileNotFoundError),
+            patch.object(m, 'write_root_json', side_effect=write),
+            patch.object(m, 'local_snapshot', side_effect=lambda _: snapshots[clock['index']]),
+            patch.object(m, 'stop_claude', side_effect=stop),
+            patch.object(m.time, 'time', side_effect=now),
+            patch.object(m.time, 'monotonic', side_effect=now),
+            patch.object(m.time, 'sleep', side_effect=sleep),
+            patch.object(m.concurrent.futures, 'ThreadPoolExecutor', return_value=pool),
+            patch.object(m.subprocess, 'run', side_effect=log),
+        ]
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            with self.assertRaises(EndPolls):
+                m.run_monitor(args())
+        return statuses, events, logs, stop_calls
+
+    def test_no_claude_during_continuous_faults_is_quiet_but_still_blocks_startup(self):
+        for snapshots, samples, expected_fault in (
+                ([{'ok': False}] * 4, [], 'vpn_disconnected'),
+                ([local()] * 4, [sample(country='CN')] * 2, 'monitor_unavailable')):
+            with self.subTest(fault=expected_fault):
+                statuses, events, logs, stops = self.run_polls(snapshots, [100, 101, 106, 107], samples)
+                self.assertEqual(events, [], 'idle faults must never enter the notification queue')
+                self.assertTrue(all(not value['ready'] for value in statuses))
+                self.assertTrue(all(not value['stop_pending'] for value in statuses))
+                self.assertEqual(set(stops), {0, 1, 2, 3}, 'the fail-closed process check must continue')
+                self.assertEqual(len(logs), 1)
+                self.assertIn(expected_fault, logs[0])
+
+    def test_no_claude_during_node_vpn_and_exit_changes_updates_background_only(self):
+        snapshots = [local(), local(), local(NODE_B), local(NODE_B), {'ok': False},
+                     local(NODE_B), local(NODE_B), local(NODE_B), local(NODE_B)]
+        statuses, events, logs, _ = self.run_polls(
+            snapshots, [100, 101, 106, 107, 108, 109, 110, 111, 112],
+            [sample(), sample(IP_B), sample()])
+        self.assertEqual(events, [])
+        for kind in ('node_changed', 'vpn_disconnected', 'exit_ip_changed'):
+            self.assertTrue(any(kind in row for row in logs), kind)
+        self.assertFalse(statuses[4]['ready'])
+        self.assertEqual(statuses[4]['fault'], 'vpn_disconnected')
+        self.assertTrue(statuses[-1]['ready'], 'monitoring and fresh exit verification must continue')
+
+    def test_real_stop_after_quiet_fault_and_later_failure_still_notify(self):
+        def stop(index, attempt):
+            if index == 1:
+                return True, False
+            if index >= 3:
+                return False, True
+            return False, False
+
+        statuses, events, _, stops = self.run_polls(
+            [{'ok': False}] * 5, [100, 101, 102, 103, 104], stop_result=stop)
+        self.assertEqual([(event['kind'], event['claude_stopped'], event['stop_failed']) for event in events],
+                         [('vpn_disconnected', True, False), ('vpn_disconnected', False, True)])
+        self.assertTrue(statuses[-1]['stop_pending'])
+        self.assertFalse(statuses[-1]['ready'])
+        self.assertIn(4, stops, 'stop failures must still be retried without repeated notifications')
+
+    def test_node_change_with_running_claude_still_queues_stop_notification(self):
+        statuses, events, _, _ = self.run_polls(
+            [local(), local(), local(NODE_B), local(NODE_B)], [100, 101, 106, 107],
+            [sample(), sample(IP_B)], stop_result=lambda index, attempt: (index == 2 and attempt == 0, False))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['kind'], 'node_changed')
+        self.assertTrue(events[0]['claude_stopped'])
+        self.assertFalse(events[0]['stop_failed'])
+        self.assertFalse(statuses[2]['ready'])
+        self.assertTrue(statuses[3]['ready'])
+
     def test_failed_stop_on_ip_change_blocks_readiness_and_retries_without_duplicate_event(self):
         # Run the real coordinator/state machine through five deterministic polls.
         # Every external effect is replaced; no thread, network, root file or signal.
@@ -378,6 +494,14 @@ class MonitorLoopTest(unittest.TestCase):
 
 
 class StorageTest(unittest.TestCase):
+    def test_idle_events_are_logged_without_writing_notification_queue(self):
+        with patch.object(m, 'write_root_json') as write, patch.object(m.subprocess, 'run') as log:
+            for kind in m.KINDS:
+                m.publish_event(501, kind, False, False)
+        write.assert_not_called()
+        self.assertEqual(log.call_count, len(m.KINDS))
+        self.assertTrue(all('stopped=False; stop_failed=False' in item.args[0][-1] for item in log.call_args_list))
+
     def test_atomic_state_and_public_status_use_expected_permissions(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(m, 'RUNTIME', Path(tmp)):
             for name, mode in [('state-501.json', 0o600), ('status-501.json', 0o644), ('events-501.json', 0o644)]:

@@ -21,6 +21,13 @@ struct CoreResult {
     let succeeded: Bool
 }
 
+struct BrowserProfile: Identifiable {
+    let id: String
+    let name: String
+}
+
+enum ConfigurationTone { case neutral, success, warning, failure }
+
 struct AccountStamp: Equatable {
     let size: String
     let date: String
@@ -87,6 +94,26 @@ final class VM: ObservableObject {
     @Published var stunPolicyMessage = ""
     @Published private(set) var stunPolicyLoaded = false
 
+    @Published var showEnvironmentSheet = false
+    @Published var environmentGroup = "🤖 Claude"
+    @Published var browserPort = "7898"
+    @Published var configureDNS = true
+    @Published var automaticGroup = true
+    @Published var enableBrowserProxy = true
+    @Published private(set) var environmentBusy = false
+    @Published private(set) var environmentLoaded = false
+    @Published private(set) var environmentMessage = ""
+    @Published private(set) var environmentTone: ConfigurationTone = .neutral
+    @Published private(set) var environmentChanges: [String] = []
+    @Published private(set) var regionSummary = "尚未读取地区目标"
+    @Published private(set) var browserBusy = false
+    @Published private(set) var browserMessage = ""
+    @Published private(set) var browserTone: ConfigurationTone = .neutral
+    @Published private(set) var browserProfiles: [BrowserProfile] = []
+    @Published private(set) var browserHasMore = false
+    @Published private(set) var browserPage = 1
+    private var environmentPlanSignature = ""
+
     static let optionalChecks: [(key: String, label: String)] = [
         ("IP一致", "IP 与上次一致"),
         ("DNS", "DNS 解析"),
@@ -121,7 +148,7 @@ final class VM: ObservableObject {
         self.operationTimeout = operationTimeout
     }
 
-    var canQuit: Bool { !switchRequested && phase != .fixing && phase != .switching }
+    var canQuit: Bool { !switchRequested && !environmentBusy && !browserBusy && phase != .fixing && phase != .switching }
 
     func start() {
         guard !started else { return }
@@ -134,7 +161,7 @@ final class VM: ObservableObject {
         if phase == .done { phase = .ready }
     }
 
-    private func run(_ args: [String], timeout: TimeInterval = 45, environment: [String: String] = [:], done: @escaping (CoreResult) -> Void) {
+    private func run(_ args: [String], timeout: TimeInterval = 45, environment: [String: String] = [:], input: Data? = nil, structuredOutput: Bool = false, done: @escaping (CoreResult) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("switcher-out-\(UUID().uuidString).txt")
             guard FileManager.default.createFile(atPath: tmp.path, contents: nil, attributes: [.posixPermissions: 0o600]),
@@ -152,6 +179,8 @@ final class VM: ObservableObject {
             p.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
             p.standardOutput = fh
             p.standardError = fh
+            let inputPipe = input == nil ? nil : Pipe()
+            if let inputPipe = inputPipe { p.standardInput = inputPipe }
             do { try p.run() } catch {
                 DispatchQueue.main.async { done(CoreResult(output: "无法启动脚本：\(error.localizedDescription)", succeeded: false)) }
                 return
@@ -159,6 +188,10 @@ final class VM: ObservableObject {
             let deadline = ProcessDeadline()
             let watchdog = DispatchWorkItem { deadline.expire(p) }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+            if let input = input, let inputPipe = inputPipe {
+                try? inputPipe.fileHandleForWriting.write(contentsOf: input)
+                try? inputPipe.fileHandleForWriting.close()
+            }
             p.waitUntilExit()
             watchdog.cancel()
             let data = (try? Data(contentsOf: tmp)) ?? Data()
@@ -167,7 +200,7 @@ final class VM: ObservableObject {
             if deadline.timedOut {
                 result = CoreResult(output: "操作超时；切换事务会在下次操作时恢复，请重新检查", succeeded: false)
             } else if p.terminationStatus != 0 {
-                result = CoreResult(output: "脚本执行失败（退出码 \(p.terminationStatus)）\n\(out)", succeeded: false)
+                result = CoreResult(output: structuredOutput ? out : "脚本执行失败（退出码 \(p.terminationStatus)）\n\(out)", succeeded: false)
             } else {
                 result = CoreResult(output: out, succeeded: true)
             }
@@ -191,7 +224,7 @@ final class VM: ObservableObject {
         coreMissing = true
         phase = .failed
         lastCheckSummary = "未安装核心脚本"
-        banner = "未安装核心脚本：请下载 installer-kit 安装包并双击 installer/安装.command，或运行源码安装"
+        banner = "需要安装本机组件。点击“安装本机组件”，在终端完成管理员验证后返回重新检查。"
         for i in rows.indices {
             rows[i].state = .fail
             rows[i].detail = "未安装核心脚本"
@@ -417,7 +450,7 @@ final class VM: ObservableObject {
     }
 
     func loadCheckConfig() {
-        guard !settingsBusy, coreAvailable() else { return }
+        guard !isBusy, !settingsBusy, coreAvailable() else { return }
         settingsBusy = true
         settingsMessage = "正在读取设置…"
         stunPolicyMessage = ""
@@ -474,7 +507,7 @@ final class VM: ObservableObject {
     }
 
     func exportDiagnostics() {
-        guard !settingsBusy, coreAvailable() else { return }
+        guard !isBusy, !settingsBusy, coreAvailable() else { return }
         let panel = NSSavePanel()
         panel.title = "导出脱敏诊断日志"
         panel.message = "仅包含检查状态、设置和脱敏操作日志，不含 IP、凭据、账号或代理配置。"
@@ -533,6 +566,208 @@ final class VM: ObservableObject {
         }
     }
 
+    var bundledInstallerURL: URL? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let installer = resources.appendingPathComponent("InstallerSource/installer/安装.command")
+        return FileManager.default.isReadableFile(atPath: installer.path) ? installer : nil
+    }
+
+    var needsComponentInstallation: Bool {
+        if coreMissing { return true }
+        guard let resources = Bundle.main.resourceURL,
+              let bundled = try? String(contentsOf: resources.appendingPathComponent("InstallerSource/VERSION"), encoding: .utf8) else { return false }
+        let installed = (try? String(contentsOfFile: NSHomeDirectory() + "/.claude-switcher/version.txt", encoding: .utf8)) ?? ""
+        return bundled.trimmingCharacters(in: .whitespacesAndNewlines) != installed.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func openBundledInstaller() {
+        guard !isBusy, !settingsBusy else { return }
+        if let installer = bundledInstallerURL {
+            if !NSWorkspace.shared.open(installer) { banner = "无法打开安装器，请从安装包中的 installer/安装.command 手动打开。" }
+        } else if let url = URL(string: "https://github.com/parafallen-maker/claude-network-rules/releases/latest") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    var environmentSettings: [String: Any]? {
+        let group = environmentGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !group.isEmpty, group.utf8.count <= 160,
+              let port = Int(browserPort), (1024...65535).contains(port) else { return nil }
+        return ["proxy_group": group, "browser_port": port, "configure_dns": configureDNS,
+                "auto_group": automaticGroup, "enable_browser_proxy": enableBrowserProxy]
+    }
+
+    private var currentEnvironmentSignature: String {
+        guard let settings = environmentSettings,
+              let data = try? JSONSerialization.data(withJSONObject: settings, options: [.sortedKeys]) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    var hasEnvironmentPlan: Bool {
+        !environmentPlanSignature.isEmpty && environmentPlanSignature == currentEnvironmentSignature
+    }
+
+    private func configurationResult(_ result: CoreResult, secret: String = "") -> (object: [String: Any], message: String, tone: ConfigurationTone) {
+        guard let data = result.output.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            // 不将未知的原始响应展示或记录，避免第三方接口回显凭据。
+            let message = result.output.hasPrefix("操作超时")
+                ? "操作超时，请重新读取配置后重试。"
+                : "操作未完成：核心组件未返回有效结果。请确认本机组件与 App 版本一致后重试。"
+            return ([:], message, .failure)
+        }
+        var message = object["message"] as? String ?? (result.succeeded ? "操作完成" : "操作未完成")
+        if let manual = object["manual_required"] as? [String], !manual.isEmpty {
+            message += "\n" + manual.joined(separator: "\n")
+        }
+        if !secret.isEmpty { message = message.replacingOccurrences(of: secret, with: "[已隐藏]") }
+        message = String(message.prefix(5000))
+        let succeeded = result.succeeded && object["ok"] as? Bool == true
+        let partial = object["partial"] as? Bool == true
+            || !(object["manual_required"] as? [String] ?? []).isEmpty
+            || (succeeded && object["complete"] as? Bool == false)
+        let tone: ConfigurationTone = partial ? .warning : (succeeded ? .success : .failure)
+        return (object, message, tone)
+    }
+
+    private func acceptEnvironmentState(_ object: [String: Any]) {
+        if let settings = object["settings"] as? [String: Any] {
+            if let value = settings["proxy_group"] as? String { environmentGroup = value }
+            if let value = settings["browser_port"] as? Int { browserPort = String(value) }
+            if let value = settings["configure_dns"] as? Bool { configureDNS = value }
+            if let value = settings["auto_group"] as? Bool { automaticGroup = value }
+            if let value = settings["enable_browser_proxy"] as? Bool { enableBrowserProxy = value }
+        }
+        acceptRegionState(object)
+    }
+
+    private func acceptRegionState(_ object: [String: Any]) {
+        if let region = object["region"] as? [String: Any] {
+            let parts = [region["country"], region["timezone"], region["locale"]].compactMap { $0 as? String }.filter { !$0.isEmpty }
+            if !parts.isEmpty { regionSummary = parts.joined(separator: " · ") }
+        }
+    }
+
+    func environmentCommand(_ action: String) {
+        guard ["status", "plan", "apply", "restore"].contains(action), !isBusy, !settingsBusy else { return }
+        guard coreAvailable(), !needsComponentInstallation else {
+            environmentMessage = "请先点击主界面的“安装本机组件”，完成后重新检查。"
+            environmentTone = .failure
+            return
+        }
+        let settings = environmentSettings
+        if ["plan", "apply"].contains(action), settings == nil {
+            environmentMessage = "请输入代理组名称，浏览器端口需在 1024–65535 之间。"
+            environmentTone = .failure
+            return
+        }
+        if action == "apply", !hasEnvironmentPlan {
+            environmentMessage = "配置有变化，请先预览本次修改。"
+            environmentTone = .warning
+            return
+        }
+        guard let input = try? JSONSerialization.data(withJSONObject: settings ?? [:], options: [.sortedKeys]), input.count <= 16384 else { return }
+        let signature = currentEnvironmentSignature
+        isBusy = true
+        environmentBusy = true
+        environmentTone = .neutral
+        environmentMessage = action == "status" ? "正在读取配置…" : "正在处理配置…"
+        if action != "apply" { environmentPlanSignature = "" }
+        run(["environment-config", action], timeout: operationTimeout, input: input, structuredOutput: true) { result in
+            let parsed = self.configurationResult(result)
+            self.environmentMessage = parsed.message
+            self.environmentTone = parsed.tone
+            self.environmentChanges = (parsed.object["changes"] as? [String] ?? []).map { String($0.prefix(600)) }
+            if action == "status" || action == "restore" { self.acceptEnvironmentState(parsed.object) }
+            if action == "status" { self.environmentLoaded = result.succeeded && parsed.object["ok"] as? Bool == true }
+            if action == "plan", result.succeeded, parsed.object["ok"] as? Bool == true { self.environmentPlanSignature = signature }
+            if action == "apply" { self.environmentPlanSignature = "" }
+            self.environmentBusy = false
+            self.isBusy = false
+        }
+    }
+
+    func configureSystem(detectRegion: Bool) {
+        guard !isBusy, !settingsBusy, coreAvailable(), !needsComponentInstallation else { return }
+        isBusy = true
+        environmentBusy = true
+        environmentTone = .neutral
+        environmentMessage = detectRegion ? "正在识别出口地区并应用系统设置；请完成管理员验证…" : "正在修复环境；请完成管理员验证…"
+        run([detectRegion ? "set-region" : "fix"], timeout: operationTimeout) { result in
+            guard result.succeeded else {
+                self.environmentMessage = "系统配置未完成，请查看主界面结果并重新检查。"
+                self.environmentTone = .failure
+                self.environmentBusy = false
+                self.isBusy = false
+                return
+            }
+            self.checkEnvironment { passed in
+                self.run(["environment-config", "status"], timeout: self.checkTimeout, input: Data("{}".utf8), structuredOutput: true) { status in
+                    let parsed = self.configurationResult(status)
+                    self.acceptRegionState(parsed.object)
+                    self.environmentMessage = passed ? "系统配置已应用，环境检查已通过。" : "系统配置已应用，但环境检查尚未全部通过，请查看主界面。"
+                    self.environmentTone = passed ? .success : .warning
+                    self.environmentBusy = false
+                    self.isBusy = false
+                }
+            }
+        }
+    }
+
+    func browserCommand(_ action: String, endpoint: String, apiKey: String, profileID: String, page: Int = 1) {
+        guard ["list", "configure", "restore"].contains(action), !isBusy, !settingsBusy else { return }
+        guard coreAvailable(), !needsComponentInstallation else {
+            browserMessage = "请先安装随包本机组件，再连接指纹浏览器。"
+            browserTone = .failure
+            return
+        }
+        guard let url = URL(string: endpoint), url.scheme == "http",
+              ["127.0.0.1", "localhost", "::1", "[::1]"].contains(url.host ?? ""),
+              url.user == nil, url.password == nil,
+              endpoint.utf8.count <= 2048, apiKey.utf8.count <= 4096,
+              profileID.utf8.count <= 256 else {
+            browserMessage = "请使用本机 AdsPower Local API 地址，例如 http://127.0.0.1:50325。"
+            browserTone = .failure
+            return
+        }
+        guard action == "list" || !profileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            browserMessage = "请先选择或填写要配置的浏览器环境 ID。"
+            browserTone = .failure
+            return
+        }
+        guard let port = Int(browserPort), (1024...65535).contains(port) else {
+            browserMessage = "请在网络页填写有效的浏览器专用端口。"
+            browserTone = .failure
+            return
+        }
+        let payload: [String: Any] = ["endpoint": endpoint, "api_key": apiKey, "profile_id": profileID, "port": port, "page": max(1, page)]
+        guard let input = try? JSONSerialization.data(withJSONObject: payload), input.count <= 16384 else { return }
+        isBusy = true
+        browserBusy = true
+        browserTone = .neutral
+        browserMessage = "正在连接本机 AdsPower…"
+        run(["browser-proxy", action], timeout: operationTimeout, input: input, structuredOutput: true) { result in
+            let parsed = self.configurationResult(result, secret: apiKey)
+            self.browserMessage = parsed.message
+            self.browserTone = parsed.tone
+            if action == "list" {
+                let profiles: [BrowserProfile] = (parsed.object["profiles"] as? [[String: Any]] ?? []).compactMap { item in
+                    guard let id = item["id"] as? String ?? item["profile_id"] as? String ?? item["user_id"] as? String else { return nil }
+                    let name = String((item["name"] as? String ?? id).prefix(160))
+                    return BrowserProfile(id: id, name: name)
+                }
+                if page > 1 {
+                    let known = Set(self.browserProfiles.map { $0.id })
+                    self.browserProfiles += profiles.filter { !known.contains($0.id) }
+                } else { self.browserProfiles = profiles }
+                self.browserHasMore = parsed.object["has_more"] as? Bool == true
+                self.browserPage = parsed.object["page"] as? Int ?? page
+            }
+            self.browserBusy = false
+            self.isBusy = false
+        }
+    }
+
     func inspectFingerprint() {
         guard !isBusy else { return }
         isBusy = true
@@ -564,7 +799,7 @@ final class VM: ObservableObject {
         return """
         这是「Claude 切换器」的 AI 交接提示词。请先完整阅读交接文档，再开始安装、配置或排障。
 
-        仓库地址：https://github.com/YOURSJEYO/claude-switcher
+        仓库地址：https://github.com/parafallen-maker/claude-network-rules
         \(agentsLine)
 
         执行要求：
@@ -735,6 +970,8 @@ struct ContentView: View {
                     VStack(spacing: 16) {
                         checksCard
                         clientCard
+                        environmentConfigurationButton
+                        if vm.needsComponentInstallation && !vm.coreMissing { setupCard }
                         if vm.phase == .ready || vm.phase == .switching || vm.phase == .done {
                             accountCard
                         } else if vm.coreMissing {
@@ -751,6 +988,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showAIPrompt) { AIPromptSheet(text: vm.aiPrompt) }
         .sheet(isPresented: $vm.showSettingsSheet) { CheckSettingsView(vm: vm) }
+        .sheet(isPresented: $vm.showEnvironmentSheet) { EnvironmentConfigurationView(vm: vm) }
         .frame(width: 440, height: height)
         .preferredColorScheme(.light)
     }
@@ -801,7 +1039,8 @@ struct ContentView: View {
 
             ClaudeIconButton(
                 systemName: "gearshape",
-                help: "检查设置与诊断日志"
+                help: "检查设置与诊断日志",
+                disabled: vm.isBusy || vm.settingsBusy
             ) {
                 vm.showSettingsSheet = true
             }
@@ -1011,36 +1250,41 @@ struct ContentView: View {
         .disabled(vm.isBusy)
     }
 
+    var environmentConfigurationButton: some View {
+        Button { vm.showEnvironmentSheet = true } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "slider.horizontal.3").foregroundColor(ClaudeTheme.terracottaDeep)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("环境配置").font(.callout.bold()).foregroundColor(ClaudeTheme.ink)
+                    Text("分流与 DNS · 系统地区 · 指纹浏览器").font(.caption2).foregroundColor(ClaudeTheme.muted)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundColor(ClaudeTheme.muted)
+            }
+            .padding(12).background(ClaudeTheme.card)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(ClaudeTheme.cardBorder))
+        }
+        .buttonStyle(.plain)
+        .disabled(vm.isBusy || vm.settingsBusy)
+    }
+
     var setupCard: some View {
         VStack(spacing: 10) {
-            Text("还差一步：安装核心脚本").font(.callout.bold()).foregroundColor(ClaudeTheme.ink)
-            Text(vm.banner).font(.caption).foregroundColor(ClaudeTheme.muted).multilineTextAlignment(.center)
+            Text(vm.coreMissing ? "还差一步：安装本机组件" : "随包组件有更新")
+                .font(.callout.bold()).foregroundColor(ClaudeTheme.ink)
+            Text("完整安装会更新本机脚本与保护服务。请在终端完成管理员验证，再返回重新检查。")
+                .font(.caption).foregroundColor(ClaudeTheme.muted).multilineTextAlignment(.center)
             HStack(spacing: 10) {
-                Button { openURL("https://github.com/YOURSJEYO/claude-switcher/releases/latest") } label: {
-                    Label("打开下载页", systemImage: "arrow.down.circle")
-                        .font(.callout.bold())
-                        .padding(.horizontal, 18).padding(.vertical, 8)
-                        .background(LinearGradient(colors: [ClaudeTheme.terracotta, ClaudeTheme.terracottaDeep], startPoint: .leading, endPoint: .trailing))
-                        .foregroundColor(.white)
-                        .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                Button { openURL("https://github.com/YOURSJEYO/claude-switcher#安装") } label: {
-                    Label("安装说明", systemImage: "book")
-                        .font(.callout.bold())
-                        .padding(.horizontal, 18).padding(.vertical, 8)
-                        .background(ClaudeTheme.iconWell)
-                        .foregroundColor(ClaudeTheme.ink)
-                        .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
+                Button(vm.bundledInstallerURL == nil ? "打开安装下载页" : "安装本机组件") { vm.openBundledInstaller() }
+                    .buttonStyle(.borderedProminent).tint(ClaudeTheme.terracottaDeep)
+                Button("完成安装后重新检查") { vm.refresh() }.disabled(vm.isBusy)
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity)
-        .background(ClaudeTheme.error.opacity(0.07))
+        .padding(12).frame(maxWidth: .infinity)
+        .background(ClaudeTheme.terracottaTint)
         .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(ClaudeTheme.error.opacity(0.25)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(ClaudeTheme.cardBorder))
     }
 
     private func openURL(_ text: String) {
@@ -1119,6 +1363,7 @@ struct ContentView: View {
 struct CheckSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: VM
+    @State private var showEnvironment = false
 
     var body: some View {
         ZStack {
@@ -1139,6 +1384,14 @@ struct CheckSettingsView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        GroupBox("环境配置") {
+                            HStack {
+                                Text("设置分流、DNS、系统地区与指纹浏览器").font(.caption).foregroundColor(ClaudeTheme.muted)
+                                Spacer()
+                                Button("打开配置") { showEnvironment = true }
+                                    .disabled(vm.isBusy || vm.settingsBusy)
+                            }.padding(.vertical, 6)
+                        }
                         GroupBox("STUN 网络策略") {
                             VStack(alignment: .leading, spacing: 10) {
                                 Toggle("阻断常见 STUN UDP 端口", isOn: $vm.blockSTUN)
@@ -1219,6 +1472,235 @@ struct CheckSettingsView: View {
         .frame(width: 520, height: 610)
         .preferredColorScheme(.light)
         .onAppear { vm.loadCheckConfig() }
+        .sheet(isPresented: $showEnvironment) { EnvironmentConfigurationView(vm: vm) }
+    }
+}
+
+// MARK: - 环境配置
+
+struct EnvironmentConfigurationView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var vm: VM
+    @State private var tab = 0
+    @State private var browserEndpoint = "http://127.0.0.1:50325"
+    @State private var browserAPIKey = ""
+    @State private var browserProfileID = ""
+
+    init(vm: VM, initialTab: Int = 0) {
+        self.vm = vm
+        _tab = State(initialValue: initialTab)
+    }
+
+    private var busy: Bool { vm.isBusy || vm.settingsBusy }
+
+    var body: some View {
+        ZStack {
+            ClaudeBackground()
+            VStack(alignment: .leading, spacing: 15) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("环境配置").font(.title2.bold()).foregroundColor(ClaudeTheme.ink)
+                        Text("配置、预览与恢复都在这里完成").font(.caption).foregroundColor(ClaudeTheme.muted)
+                    }
+                    Spacer()
+                    if vm.environmentBusy || vm.browserBusy { ProgressView().scaleEffect(0.7) }
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(ClaudeTheme.muted)
+                    }
+                    .buttonStyle(.plain).disabled(vm.environmentBusy || vm.browserBusy)
+                    .accessibilityLabel("关闭环境配置")
+                }
+                Picker("配置类别", selection: $tab) {
+                    Text("网络").tag(0)
+                    Text("系统").tag(1)
+                    Text("指纹浏览器").tag(2)
+                }.pickerStyle(.segmented)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if vm.needsComponentInstallation {
+                            GroupBox("需要安装本机组件") {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("请打开随包安装器，完成终端中的管理员验证后返回主界面重新检查。")
+                                        .font(.caption).foregroundColor(ClaudeTheme.muted)
+                                    Button("安装本机组件") { vm.openBundledInstaller() }.disabled(busy)
+                                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5)
+                            }
+                        }
+                        if tab == 0 { networkSection }
+                        else if tab == 1 { systemSection }
+                        else { browserSection }
+                    }.padding(.vertical, 2)
+                }
+                if tab != 2 && !vm.environmentMessage.isEmpty {
+                    messageBox(vm.environmentMessage, tone: vm.environmentTone)
+                }
+                if tab == 2 && !vm.browserMessage.isEmpty {
+                    messageBox(vm.browserMessage, tone: vm.browserTone)
+                }
+            }.padding(22)
+        }
+        .frame(width: 600, height: 690)
+        .preferredColorScheme(.light)
+        .interactiveDismissDisabled(vm.environmentBusy || vm.browserBusy)
+        .onAppear { vm.environmentCommand("status") }
+        .onDisappear { browserAPIKey = "" }
+    }
+
+    private var networkSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            GroupBox("Clash Verge 分流与 DNS") {
+                VStack(alignment: .leading, spacing: 11) {
+                    Text("Claude 与 IP 检测走专用代理组，国内与局域网直连，其余流量走代理。")
+                        .font(.caption).foregroundColor(ClaudeTheme.muted)
+                    HStack {
+                        Text("已安装代理组").frame(width: 105, alignment: .leading)
+                        Text(vm.environmentLoaded ? vm.environmentGroup : "请先读取当前配置")
+                            .fontWeight(.medium).textSelection(.enabled)
+                        Spacer()
+                    }
+                    Text("沿用安装时的代理组。更换组名需运行完整安装器，同步本机脚本与系统保护服务。")
+                        .font(.caption2).foregroundColor(ClaudeTheme.muted)
+                    Toggle("订阅缺少同名代理组时自动创建", isOn: $vm.automaticGroup)
+                    Toggle("应用托管 DNS 设置", isOn: $vm.configureDNS)
+                    Text("自动创建的组会先阻断流量。请在 Clash Verge 中选择可用节点，再重新应用并验证。")
+                        .font(.caption2).foregroundColor(ClaudeTheme.muted)
+                }.padding(.vertical, 6)
+            }
+            GroupBox("浏览器专用代理") {
+                VStack(alignment: .leading, spacing: 11) {
+                    Toggle("启用本机专用代理入口", isOn: $vm.enableBrowserProxy)
+                    HStack {
+                        Text("监听端口").frame(width: 105, alignment: .leading)
+                        TextField("7898", text: $vm.browserPort).textFieldStyle(.roundedBorder).frame(width: 110)
+                        Text("仅限本机 127.0.0.1").font(.caption).foregroundColor(ClaudeTheme.muted)
+                    }
+                    Text("指纹浏览器可通过这一入口固定使用上方代理组。端口范围 1024–65535。")
+                        .font(.caption2).foregroundColor(ClaudeTheme.muted)
+                }.padding(.vertical, 6)
+            }
+            if !vm.environmentChanges.isEmpty {
+                GroupBox("本次修改预览") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(Array(vm.environmentChanges.enumerated()), id: \.offset) { _, change in
+                            Text("• " + change).font(.caption).fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !vm.hasEnvironmentPlan {
+                            Text("配置已变化或预览已执行；应用前请重新预览。")
+                                .font(.caption2).foregroundColor(ClaudeTheme.warning)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5)
+                }
+            }
+            HStack {
+                Button("读取当前配置") { vm.environmentCommand("status") }
+                Spacer()
+                Button("预览修改") { vm.environmentCommand("plan") }.disabled(!vm.environmentLoaded || vm.environmentSettings == nil)
+                Button("应用配置") { vm.environmentCommand("apply") }
+                    .buttonStyle(.borderedProminent).tint(ClaudeTheme.terracottaDeep)
+                    .disabled(!vm.hasEnvironmentPlan)
+            }
+            Text("应用或恢复可能短暂重启 Clash Verge，网络连接可能中断。配置变更会保留可恢复的备份。")
+                .font(.caption2).foregroundColor(ClaudeTheme.muted)
+            Button("恢复上一次网络配置") { vm.environmentCommand("restore") }
+                .foregroundColor(ClaudeTheme.terracottaDeep)
+        }.disabled(busy)
+    }
+
+    private var systemSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            GroupBox("地区目标") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(vm.regionSummary).font(.callout.weight(.medium)).textSelection(.enabled)
+                    Text("更换国家节点后，可按实际出口重新识别国家、时区与地区格式，并同步保护服务。")
+                        .font(.caption).foregroundColor(ClaudeTheme.muted)
+                    Button("按当前出口配置地区") { vm.configureSystem(detectRegion: true) }
+                        .buttonStyle(.borderedProminent).tint(ClaudeTheme.terracottaDeep)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+            }
+            GroupBox("系统与环境修复") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("应用当前地区目标、客户端语言与 IPv6 设置，修复 TUN、托管分流和保护服务，完成后重新检查。")
+                        .font(.caption).foregroundColor(ClaudeTheme.muted)
+                    Button("应用当前目标并修复环境") { vm.configureSystem(detectRegion: false) }
+                    Text("操作会要求管理员验证，也可能重启代理。")
+                        .font(.caption2).foregroundColor(ClaudeTheme.muted)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+            }
+            Text("系统设置以实际出口为依据。字体、GPU、浏览器版本等设备特征保持设备自身状态。")
+                .font(.caption2).foregroundColor(ClaudeTheme.muted)
+        }.disabled(busy)
+    }
+
+    private var browserSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            GroupBox("连接 AdsPower") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("先在 AdsPower 启用 Local API。只配置你选择的已关闭环境；配置过程不会启动浏览器。")
+                        .font(.caption).foregroundColor(ClaudeTheme.muted)
+                    TextField("Local API 地址", text: $browserEndpoint).textFieldStyle(.roundedBorder)
+                    SecureField("API Key（仅本次窗口使用）", text: $browserAPIKey).textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("读取浏览器环境") { requestBrowser("list") }
+                        if vm.browserHasMore {
+                            Button("读取更多") { requestBrowser("list", page: vm.browserPage + 1) }
+                        }
+                        Spacer()
+                        Text("密钥不会保存到设置").font(.caption2).foregroundColor(ClaudeTheme.muted)
+                    }
+                    if !vm.browserProfiles.isEmpty {
+                        Picker("浏览器环境", selection: $browserProfileID) {
+                            Text("请选择环境").tag("")
+                            ForEach(vm.browserProfiles) { profile in
+                                Text(profile.name + " · " + profile.id).tag(profile.id)
+                            }
+                        }
+                    }
+                    TextField("浏览器环境 ID（也可手动填写）", text: $browserProfileID).textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("配置选中环境") { requestBrowser("configure") }
+                            .buttonStyle(.borderedProminent).tint(ClaudeTheme.terracottaDeep)
+                        Button("恢复选中环境") { requestBrowser("restore") }
+                    }.disabled(browserProfileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }.padding(.vertical, 6)
+            }.disabled(busy)
+            GroupBox("手动配置参数") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("若当前 AdsPower 套餐未开放 API，可在浏览器环境设置中填写以下参数。先到网络页应用专用代理入口。")
+                        .font(.caption).foregroundColor(ClaudeTheme.muted)
+                    Text("代理类型：HTTP\n代理主机：127.0.0.1\n代理端口：\(vm.browserPort)\n用户名与密码：留空\nWebRTC：禁用")
+                        .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    Button("复制配置参数") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("HTTP 127.0.0.1:\(vm.browserPort)\n用户名与密码：留空\nWebRTC：禁用", forType: .string)
+                    }
+                    Text("若 API 未返回 WebRTC 原设置，将只配置代理，并提示你到 AdsPower 手动禁用。网络配置成功不代表 WebRTC 已完成。")
+                        .font(.caption2).foregroundColor(ClaudeTheme.warning)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+            }
+        }
+    }
+
+    private func requestBrowser(_ action: String, page: Int = 1) {
+        vm.browserCommand(action, endpoint: browserEndpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+                          apiKey: browserAPIKey, profileID: browserProfileID.trimmingCharacters(in: .whitespacesAndNewlines), page: page)
+    }
+
+    private func messageBox(_ text: String, tone: ConfigurationTone) -> some View {
+        let color: Color = tone == .failure ? ClaudeTheme.error : tone == .warning ? ClaudeTheme.warning : tone == .success ? ClaudeTheme.success : ClaudeTheme.muted
+        return Group {
+            if text.count <= 160 && !text.contains("\n") {
+                Text(text).font(.caption).foregroundColor(color)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            } else {
+                ScrollView {
+                    Text(text).font(.caption).foregroundColor(color)
+                        .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                }.frame(maxHeight: 100)
+            }
+        }
+        .padding(10).background(color.opacity(0.07))
+        .clipShape(RoundedRectangle(cornerRadius: 9))
     }
 }
 
@@ -1548,12 +2030,18 @@ struct MenuBarContent: View {
             vm.checkUpdate()
             vm.showUpdateSheet = true
         }
+        Button("环境配置") {
+            showWindow()
+            vm.showEnvironmentSheet = true
+        }
+        .disabled(vm.isBusy || vm.settingsBusy)
         Button("检查设置") {
             showWindow()
             vm.showSettingsSheet = true
         }
+        .disabled(vm.isBusy || vm.settingsBusy)
         Button("导出诊断日志") { vm.exportDiagnostics() }
-            .disabled(vm.settingsBusy)
+            .disabled(vm.isBusy || vm.settingsBusy)
         Divider()
         Button("退出 Claude 切换器") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")

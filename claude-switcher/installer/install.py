@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Staged macOS installation and reversible system changes.
 
-The public installer compiles before replacing anything. The privileged worker
+The public installer prepares a verified App before replacing anything. The privileged worker
 has a fixed destination allowlist and never enables the optional PF guard.
 """
 import argparse
@@ -13,11 +13,16 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+
+# This entry point may run from a signed App's embedded source. Importing its
+# helpers must not add bytecode files to the sealed Resources directory.
+sys.dont_write_bytecode = True
 
 SOURCE = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("component_manager", SOURCE / "core/component-manager.py")
@@ -256,15 +261,85 @@ def root_rollback():
     shutil.rmtree(SYSTEM_JOURNAL)
 
 
-def compile_app(source, output, version):
-    output = Path(output)
-    (output / "Contents/MacOS").mkdir(parents=True)
-    (output / "Contents/Resources").mkdir()
+def host_architecture():
     arch = read_text(["/usr/bin/uname", "-m"])
     if arch not in ("arm64", "x86_64"):
         raise cm.ComponentError("不支持的 macOS 架构")
-    run(["/usr/bin/xcrun", "swiftc", "-O", "-parse-as-library", "-warnings-as-errors", "-target", arch + "-apple-macos13.0",
-         source / "app/main.swift", "-o", output / "Contents/MacOS/ClaudeSwitcher", "-framework", "SwiftUI", "-framework", "AppKit"])
+    return arch
+
+
+def macho_architectures(executable):
+    """Read native slice headers without requiring Xcode's lipo on first install."""
+    names = {0x01000007: "x86_64", 0x0100000C: "arm64"}
+    thin = {b"\xcf\xfa\xed\xfe": "<", b"\xfe\xed\xfa\xcf": ">"}
+    fat = {b"\xca\xfe\xba\xbe": (">", "IIIII"), b"\xbe\xba\xfe\xca": ("<", "IIIII"),
+           b"\xca\xfe\xba\xbf": (">", "IIQQII"), b"\xbf\xba\xfe\xca": ("<", "IIQQII")}
+    try:
+        size = Path(executable).stat().st_size
+        with Path(executable).open("rb") as stream:
+            header = stream.read(8)
+            if len(header) != 8 or size < 32:
+                raise ValueError()
+            if header[:4] in thin:
+                cpu = struct.unpack(thin[header[:4]] + "I", header[4:])[0]
+                return {names[cpu]} if cpu in names else set()
+            if header[:4] not in fat:
+                raise ValueError()
+            order, fields = fat[header[:4]]
+            count = struct.unpack(order + "I", header[4:])[0]
+            if not 1 <= count <= 16:
+                raise ValueError()
+            entry_size = struct.calcsize(order + fields)
+            table = stream.read(count * entry_size)
+            if len(table) != count * entry_size:
+                raise ValueError()
+            architectures, ranges = set(), []
+            for index in range(count):
+                cpu, _, offset, length, *_ = struct.unpack_from(order + fields, table, index * entry_size)
+                if offset < 8 + len(table) or length < 32 or offset + length > size:
+                    raise ValueError()
+                if any(offset < end and start < offset + length for start, end in ranges):
+                    raise ValueError()
+                ranges.append((offset, offset + length))
+                stream.seek(offset)
+                slice_header = stream.read(8)
+                if slice_header[:4] not in thin or struct.unpack(thin[slice_header[:4]] + "I", slice_header[4:])[0] != cpu:
+                    raise ValueError()
+                if cpu in names:
+                    architectures.add(names[cpu])
+            return architectures
+    except (OSError, ValueError, struct.error):
+        raise cm.ComponentError("预编译 App 的可执行文件架构信息无效")
+
+
+def compile_app(source, output, version, arch=None):
+    source, output = Path(source), Path(output)
+    arch = host_architecture() if arch is None else arch
+    if arch not in ("arm64", "x86_64", "universal"):
+        raise cm.ComponentError("不支持的 macOS 构建架构")
+    (output / "Contents/MacOS").mkdir(parents=True)
+    (output / "Contents/Resources").mkdir()
+
+    def compile_binary(source_file, executable, frameworks, parse_as_library=False):
+        architectures = ("arm64", "x86_64") if arch == "universal" else (arch,)
+        with tempfile.TemporaryDirectory(prefix="claude-switcher-swift-") as temporary:
+            binaries = []
+            for target in architectures:
+                binary = Path(temporary) / target
+                command = ["/usr/bin/xcrun", "swiftc", "-O", "-warnings-as-errors"]
+                if parse_as_library:
+                    command.append("-parse-as-library")
+                command += ["-target", target + "-apple-macos13.0", source_file, "-o", binary]
+                for framework in frameworks:
+                    command += ["-framework", framework]
+                run(command)
+                binaries.append(binary)
+            if arch == "universal":
+                run(["/usr/bin/lipo", "-create", *binaries, "-output", executable])
+            else:
+                shutil.copy2(binaries[0], executable)
+
+    compile_binary(source / "app/main.swift", output / "Contents/MacOS/ClaudeSwitcher", ("SwiftUI", "AppKit"), True)
     with tempfile.TemporaryDirectory() as d:
         icons = Path(d) / "AppIcon.iconset"
         icons.mkdir()
@@ -280,9 +355,7 @@ def compile_app(source, output, version):
     (output / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
     notifier = output / "Contents/Helpers/NetworkNotifier.app"
     (notifier / "Contents/MacOS").mkdir(parents=True)
-    run(["/usr/bin/xcrun", "swiftc", "-O", "-warnings-as-errors", "-target", arch + "-apple-macos13.0",
-         source / "app/network-notifier.swift", "-o", notifier / "Contents/MacOS/NetworkNotifier",
-         "-framework", "AppKit", "-framework", "UserNotifications"])
+    compile_binary(source / "app/network-notifier.swift", notifier / "Contents/MacOS/NetworkNotifier", ("AppKit", "UserNotifications"))
     notifier_info = {"CFBundleExecutable": "NetworkNotifier", "CFBundleIdentifier": "local.claude-switcher.network-notifier",
                      "CFBundleName": "Claude 网络防护", "CFBundleDisplayName": "Claude 网络防护",
                      "CFBundlePackageType": "APPL", "CFBundleVersion": version.split("-")[0],
@@ -291,6 +364,59 @@ def compile_app(source, output, version):
     run(["/usr/bin/codesign", "--force", "-s", "-", notifier])
     run(["/usr/bin/codesign", "--force", "--deep", "-s", "-", output])
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", output])
+
+
+def verify_prebuilt_app(source, app, version):
+    """Bind a signed, runnable App to the complete source used by this install."""
+    source, app = Path(source).resolve(), Path(app)
+    manifest = cm.load_bundle(source)
+    if manifest["version"] != version:
+        raise cm.ComponentError("预编译 App 与安装源码版本不一致")
+    if app.is_symlink() or not app.is_dir() or app.suffix != ".app":
+        raise cm.ComponentError("预编译 App 路径无效")
+    app = app.resolve()
+    for path in app.rglob("*"):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise cm.ComponentError("预编译 App 包含不支持的文件或符号链接")
+    try:
+        info = json.loads((app / "Contents/Resources/BuildInfo.json").read_text())
+        expected = cm.digest(source / "COMPONENTS.json")
+        if info.get("version") != version or info.get("components_sha256") != expected:
+            raise cm.ComponentError("预编译 App 的版本或组件清单校验不一致")
+        embedded = app / "Contents/Resources/InstallerSource"
+        cm.load_bundle(embedded)
+        if cm.digest(embedded / "COMPONENTS.json") != expected:
+            raise cm.ComponentError("预编译 App 的内置源码与安装组件不一致")
+        bundles = ((app, "ClaudeSwitcher", "local.claude-switcher"),
+                   (app / "Contents/Helpers/NetworkNotifier.app", "NetworkNotifier", "local.claude-switcher.network-notifier"))
+        executables = []
+        for bundle, name, identifier in bundles:
+            metadata = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+            if (metadata.get("CFBundleExecutable") != name or metadata.get("CFBundleIdentifier") != identifier
+                    or metadata.get("CFBundleVersion") != version.split("-")[0]
+                    or metadata.get("CFBundleShortVersionString") != version.split("-")[0]):
+                raise cm.ComponentError("预编译 App 的程序标识或版本无效")
+            if bundle == app and metadata.get("ClaudeSwitcherVersion") != version:
+                raise cm.ComponentError("预编译 App 的完整版本不一致")
+            executable = bundle / "Contents/MacOS" / name
+            if not executable.is_file() or not os.access(executable, os.X_OK):
+                raise cm.ComponentError("预编译 App 缺少可执行程序")
+            executables.append(executable)
+    except (OSError, ValueError, TypeError, AttributeError, plistlib.InvalidFileException):
+        raise cm.ComponentError("预编译 App 的构建信息缺失或无效")
+    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app])
+    arch = host_architecture()
+    for executable in executables:
+        if arch not in macho_architectures(executable):
+            raise cm.ComponentError("预编译 App 不支持当前 Mac 架构: " + arch)
+
+
+def stage_prebuilt_app(source, app, output, version):
+    verify_prebuilt_app(source, app, version)
+    # Preserve any link introduced during copying so the second validation can
+    # reject it, instead of following it outside the source bundle.
+    shutil.copytree(app, output, symlinks=True)
+    verify_prebuilt_app(source, output, version)
 
 
 def stage_user_files(source, home, config, manifest):
@@ -354,9 +480,13 @@ def install(args):
         raise cm.ComponentError("存在待恢复系统安装；请先运行 recover-install 或授权 system-rollback")
     with tempfile.TemporaryDirectory(prefix="claude-switcher-install-") as work:
         work = Path(work)
-        print("正在暂存编译；现有安装尚未修改。", flush=True)
         staged = work / "Claude切换器.app"
-        compile_app(source, staged, manifest["version"])
+        if getattr(args, "prebuilt_app", None) is not None:
+            print("正在校验并暂存完整 App；现有安装尚未修改。", flush=True)
+            stage_prebuilt_app(source, args.prebuilt_app, staged, manifest["version"])
+        else:
+            print("正在暂存编译；现有安装尚未修改。", flush=True)
+            compile_app(source, staged, manifest["version"])
         with cm.state_lock(base):
             # Another installer may have left recovery state while this one compiled.
             if (base / "install-journal.json").exists() or SYSTEM_JOURNAL.exists():
@@ -636,6 +766,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("action", choices=("install", "uninstall", "recover-install", "system-apply", "system-rollback", "system-commit", "system-finish", "system-uninstall"))
     p.add_argument("--source", type=Path, default=SOURCE)
+    p.add_argument("--prebuilt-app", type=Path, help="复用已签名且与完整安装源码匹配的预编译 App")
     p.add_argument("--home", type=Path, default=Path.home())
     p.add_argument("--config", type=Path)
     p.add_argument("--proxy-mode", default="auto")

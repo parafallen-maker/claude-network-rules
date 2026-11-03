@@ -11,6 +11,10 @@ concurrency:
   group: candidate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    working-directory: claude-switcher
+
 jobs:
   verify:
     uses: ./.github/workflows/checks.yml
@@ -34,15 +38,17 @@ jobs:
           set -euo pipefail
           bash scripts/package-macos.sh "$(cat VERSION)"
           lipo -info build/Claude切换器.app/Contents/MacOS/ClaudeSwitcher
+          lipo -info build/Claude切换器.app/Contents/Helpers/NetworkNotifier.app/Contents/MacOS/NetworkNotifier
           codesign --verify --deep --strict build/Claude切换器.app
+          python3 -B core/component-manager.py verify --source build/Claude切换器.app/Contents/Resources/InstallerSource
           (cd build && shasum -a 256 *.zip *.dmg > SHA256SUMS-artifacts.txt)
       - name: Upload reviewable artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ClaudeSwitcher-${{ matrix.architecture }}-${{ github.sha }}
           path: |
-            build/*.zip
-            build/*.dmg
-            build/SHA256SUMS-artifacts.txt
+            claude-switcher/build/*.zip
+            claude-switcher/build/*.dmg
+            claude-switcher/build/SHA256SUMS-artifacts.txt
           retention-days: 14
           if-no-files-found: error

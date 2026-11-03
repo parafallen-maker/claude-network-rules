@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "acknowledge_machine_wide_filter": false,
+  "physical_interfaces": ["en0"],
+  "tunnel_interfaces": ["utun8"],
+  "proxy_endpoints": [
+    {"address": "203.0.113.2", "port": 443, "protocol": "tcp", "interface": "en0"},
+    {"address": "2001:db8::2", "port": 443, "protocol": "udp", "interface": "en0"}
+  ]
+}

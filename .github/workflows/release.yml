@@ -1,0 +1,91 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: claude-switcher
+
+jobs:
+  verify:
+    uses: ./.github/workflows/checks.yml
+
+  release:
+    needs: verify
+    name: Build and publish macOS
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      CLAUDE_SWITCHER_BUILD_ARCH: universal
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve version from tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$VERSION" in
+            ''|*[!0-9A-Za-z._-]*) echo "::error::tag must look like v1.2.3"; exit 1 ;;
+          esac
+          test "$VERSION" = "$(cat VERSION)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Package complete macOS app and source
+        run: |
+          bash -n scripts/package-macos.sh
+          bash scripts/package-macos.sh "$VERSION"
+
+      - name: Verify complete bundle
+        run: |
+          set -euo pipefail
+          APP="build/Claude切换器.app"
+          test "$(plutil -extract ClaudeSwitcherVersion raw "$APP/Contents/Info.plist")" = "$VERSION"
+          test "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" = "${VERSION%%-*}"
+          lipo "$APP/Contents/MacOS/ClaudeSwitcher" -verify_arch arm64 x86_64
+          lipo "$APP/Contents/Helpers/NetworkNotifier.app/Contents/MacOS/NetworkNotifier" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict "$APP"
+          python3 -B core/component-manager.py verify --source "$APP/Contents/Resources/InstallerSource"
+
+      - name: Generate release checksums
+        run: |
+          set -euo pipefail
+          cd build
+          shasum -a 256 \
+            "ClaudeSwitcher-${VERSION}-macos-universal.zip" \
+            "ClaudeSwitcher-${VERSION}-macos-universal.dmg" \
+            "ClaudeSwitcher-${VERSION}-source.zip" \
+            "ClaudeSwitcher-${VERSION}-installer-kit.zip" \
+            > SHA256SUMS-release.txt
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS=(
+            "build/ClaudeSwitcher-${VERSION}-macos-universal.zip"
+            "build/ClaudeSwitcher-${VERSION}-macos-universal.dmg"
+            "build/ClaudeSwitcher-${VERSION}-source.zip"
+            "build/ClaudeSwitcher-${VERSION}-installer-kit.zip"
+            "build/SHA256SUMS-release.txt"
+          )
+          RELEASE_FLAGS=()
+          case "$VERSION" in *-*) RELEASE_FLAGS+=(--prerelease) ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" "${RELEASE_FLAGS[@]}" \
+              --generate-notes --title "Claude 切换器 ${VERSION}"
+          fi

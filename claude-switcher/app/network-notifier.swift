@@ -26,6 +26,7 @@ private struct MonitorEvent: Decodable {
         return event
     }
 
+    var requiresNotification: Bool { claude_stopped || stop_failed == true }
     var title: String { "Claude 网络防护" }
     var body: String {
         let reason: String
@@ -71,9 +72,11 @@ private struct NotifierStatus: Codable {
         last_event_time = event.time
         last_stop_failed = event.stop_failed ?? false
         last_delivery = nil
-        delivery_state = "pending"
+        // Consume legacy idle events too, so an upgrade/restart cannot replay
+        // a warning that did not affect Claude. Manual tests bypass this path.
+        delivery_state = event.requiresNotification ? "pending" : "suppressed"
         delivery_error = nil
-        return true
+        return event.requiresNotification
     }
 }
 
@@ -368,7 +371,25 @@ private func selfTest() throws {
     let failedStop = try MonitorEvent.decode(JSONSerialization.data(withJSONObject: failure), now: now)!
     precondition(failedStop.body.contains("未能确认 Claude 已停止") && !failedStop.body.contains("当前没有"))
     precondition(state.consume(failedStop) && state.last_stop_failed == true)
-    print("OK: notifier event parsing, fixed text, persistent deduplication and pending-state checks")
+    for (index, kind) in MonitorEvent.kinds.sorted().enumerated() {
+        // Older monitor versions omitted stop_failed; both representations of
+        // an idle event must be persisted as handled without scheduling a banner.
+        for includeFailure in [false, true] {
+            let id = "idle-event-\(index)-\(includeFailure)"
+            var latest: [String: Any] = ["id": id, "time": now, "kind": kind, "claude_stopped": false]
+            if includeFailure { latest["stop_failed"] = false }
+            let idle = try MonitorEvent.decode(JSONSerialization.data(withJSONObject: ["schema": 1, "latest": latest]), now: now)!
+            precondition(!idle.requiresNotification && !state.consume(idle))
+            precondition(state.handled_event_ids.contains(id) && state.last_event_id == id)
+            precondition(state.delivery_state == "suppressed" && state.last_delivery == nil && state.delivery_error == nil)
+            var restarted = try JSONDecoder().decode(NotifierStatus.self, from: JSONEncoder().encode(state))
+            precondition(!restarted.consume(idle) && restarted.delivery_state == "suppressed")
+        }
+    }
+    var actionableState = NotifierStatus()
+    precondition(actionableState.consume(event) && actionableState.delivery_state == "pending")
+    precondition(actionableState.consume(failedStop) && actionableState.delivery_state == "pending")
+    print("OK: notifier event parsing, fixed text, persistent deduplication, idle suppression and actionable-event checks")
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())

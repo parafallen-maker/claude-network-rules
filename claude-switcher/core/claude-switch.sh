@@ -4,6 +4,18 @@
 set -u
 export LC_ALL=en_US.UTF-8
 
+# Structured environment/browser helpers read private input only from stdin.
+case "${1:-}" in
+    environment-config|browser-proxy)
+        _feature="$1"; shift
+        _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        _helper="$_here/$_feature.py"
+        [ -f "$_helper" ] || _helper="$HOME/.claude-switcher/$_feature.py"
+        [ -f "$_helper" ] || { printf '{"ok":false,"message":"缺少环境组件，请重新安装完整版本。"}\n'; exit 1; }
+        exec "${CLAUDE_SWITCHER_PYTHON:-python3}" "$_helper" "$@"
+        ;;
+esac
+
 if [ "${1:-}" = "_support" ]; then
     shift
     exec "${CLAUDE_SWITCHER_PYTHON:-python3}" - "$@" <<'PY_SUPPORT'

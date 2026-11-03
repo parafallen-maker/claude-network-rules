@@ -205,7 +205,7 @@ def expected_rules():
     return rules
 
 
-def verify_runtime(clash_dir, group, policy, allow_plain_ports=False):
+def verify_runtime(clash_dir, group, policy, allow_plain_ports=False, require_node=True):
     base, secret = controller_config(clash_dir)
     state = {
         "configs": api_get(base, secret, "/configs"),
@@ -214,7 +214,8 @@ def verify_runtime(clash_dir, group, policy, allow_plain_ports=False):
     }
     if str(state["configs"].get("mode", "")).lower() != "rule":
         fail("请切换到规则模式；国内直连、Claude/IP 检测优先代理，全局模式会绕过分流和 STUN 防护")
-    validate_group(state, group, policy)
+    if require_node:
+        validate_group(state, group, policy)
     rules = state["rules"].get("rules")
     if not isinstance(rules, list):
         fail("Clash /rules 返回格式异常")
@@ -270,9 +271,54 @@ def rule_strings(group, policy):
             [f"MATCH,{group}"])
 
 
-def managed_block(group, policy):
+def environment_block(group, options):
+    # This code runs after all subscription/global merges, so it also works when
+    # the next subscription does not provide the installed group name.
+    keys = {"proxy_group", "browser_port", "configure_dns", "auto_group", "enable_browser_proxy"}
+    if (not isinstance(options, dict) or set(options) != keys or options["proxy_group"] != group
+            or type(options["browser_port"]) is not int or not 1024 <= options["browser_port"] <= 65535
+            or any(type(options[k]) is not bool for k in ("configure_dns", "auto_group", "enable_browser_proxy"))):
+        fail("环境配置格式无效")
+    encoded = json.dumps(options, ensure_ascii=False)
+    return """
+    const env = %s;
+    result["claude-switcher-environment"] = JSON.stringify(env);
+    const groups = result["proxy-groups"] || (result["proxy-groups"] = []);
+    if (!Array.isArray(groups)) throw new Error("claude-switcher: invalid proxy groups");
+    if (!groups.some(g => g && g.name === group) && env.auto_group) {
+      const nodes = (result.proxies || []).filter(p => p && p.name !== group && !["direct","reject","pass"].includes(String(p.type).toLowerCase())).map(p => p.name);
+      const providers = Object.keys(result["proxy-providers"] || {});
+      const added = {name:group,type:"select",proxies:["REJECT", ...nodes]};
+      if (providers.length) added.use = providers;
+      groups.push(added);
+    }
+    const listeners = result.listeners || [];
+    if (!Array.isArray(listeners)) throw new Error("claude-switcher: invalid listeners");
+    const own = l => l && l.name === "adspower-claude-local" && l.type === "http" && l.listen === "127.0.0.1" && l.proxy === group;
+    if (listeners.some(l => l && (l.name === "adspower-claude-local" || (env.enable_browser_proxy && Number(l.port) === env.browser_port)) && !own(l))) throw new Error("claude-switcher: browser listener conflicts with an existing listener");
+    for (const key of ["port","mixed-port","socks-port","redir-port","tproxy-port"]) {
+      if (env.enable_browser_proxy && Number(result[key]) === env.browser_port) throw new Error("claude-switcher: browser port is already used");
+    }
+    for (const address of [result["external-controller"], result["external-controller-tls"], (result.dns || {}).listen]) {
+      const match = typeof address === "string" ? address.match(/:([0-9]+)$/) : null;
+      if (env.enable_browser_proxy && match && Number(match[1]) === env.browser_port) throw new Error("claude-switcher: browser port conflicts with DNS/controller");
+    }
+    result.listeners = listeners.filter(l => !own(l));
+    if (env.enable_browser_proxy) result.listeners.push({name:"adspower-claude-local",type:"http",listen:"127.0.0.1",port:env.browser_port,proxy:group});
+    if (env.configure_dns) {
+      const dns = result.dns || {};
+      if (typeof dns !== "object" || Array.isArray(dns)) throw new Error("claude-switcher: invalid DNS");
+      result.dns = {...dns, enable:true, "enhanced-mode":"fake-ip", "respect-rules":true,
+        nameserver:["https://1.1.1.1/dns-query#" + group], "nameserver-policy":{}, fallback:[],
+        "direct-nameserver":[], "proxy-server-nameserver": dns["proxy-server-nameserver"] && dns["proxy-server-nameserver"].length ? dns["proxy-server-nameserver"] : ["https://1.1.1.1/dns-query"]};
+    }
+    """ % encoded
+
+
+def managed_block(group, policy, options=None):
     encoded = json.dumps(rule_strings(group, policy), ensure_ascii=False)
     group_json = json.dumps(group, ensure_ascii=False)
+    environment = environment_block(group, options) if options is not None else ""
     return f"""{SCRIPT_BEGIN}
 ;(function () {{
   const originalMain = main;
@@ -281,6 +327,7 @@ def managed_block(group, policy):
   main = function (config, ...args) {{
     const result = originalMain(config, ...args);
     if (!result || typeof result !== \"object\" || Array.isArray(result)) throw new Error(\"claude-switcher: original main must return a config object\");
+    {environment}
     if (!Array.isArray(result[\"proxy-groups\"]) || !result[\"proxy-groups\"].some((item) => item && item.name === group)) throw new Error(\"claude-switcher: configured proxy group missing\");
     if (result.rules !== undefined && !Array.isArray(result.rules)) throw new Error(\"claude-switcher: rules must be an array\");
     result.rules = pinnedRules.slice();
@@ -291,9 +338,9 @@ def managed_block(group, policy):
 {SCRIPT_END}"""
 
 
-def script_text(path, group, policy):
+def script_text(path, group, policy, options=None):
     old = read_text(path) if path.exists() else ""
-    block = managed_block(group, policy)
+    block = managed_block(group, policy, options)
     if SCRIPT_BEGIN in old:
         if old.count(SCRIPT_BEGIN) != 1 or old.count(SCRIPT_END) != 1:
             fail("Script.js 中存在未闭合的 claude-switcher 管理块")
@@ -436,7 +483,11 @@ def main():
     profiles = clash_dir / "profiles"
     script_path = profiles / "Script.js"
     merge_path = profiles / "Merge.yaml"
-    new_script = script_text(script_path, group, policy)
+    settings_path = base_dir / "environment-settings.json"
+    options = json.loads(read_text(settings_path)) if settings_path.exists() else None
+    if options is not None and options.get("proxy_group") != group:
+        fail("环境配置代理组与安装设置不一致，请重新配置")
+    new_script = script_text(script_path, group, policy, options)
     new_merge = migrate_merge(merge_path)
     changes = {script_path: new_script, policy_path: policy + "\n"}
     if new_merge is not None:

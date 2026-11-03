@@ -1,6 +1,21 @@
-# Claude 与 IP 检测分流配置
+# Claude 切换器与网络环境配置
 
-供 Clash Verge / Mihomo 复用的个人规则：**Claude 和 IP 检测优先代理，国内及局域网直连，其余流量代理**。默认开启常见 STUN UDP 端口阻断。
+提供可公开复用的 macOS **Claude 切换器 1.9.0**、一键环境配置与独立 Clash 分流规则。
+
+[下载完整 macOS 安装包](https://github.com/parafallen-maker/claude-network-rules/releases/latest) · [切换器说明](claude-switcher/README.md) · [环境配置说明](claude-switcher/docs/network/ENVIRONMENT.md)
+
+## 安装与一键配置
+
+1. 从 Releases 下载 `ClaudeSwitcher-1.9.0-macos-universal.zip` 或 DMG，打开 App 后点击“安装本机组件”。安装包包含主程序、通知助手和安装器；Apple Silicon 与 Intel 通用，需要 Python 3，预编译安装不要求 Swift 编译器。系统组件安装由 macOS 要求管理员验证。当前包使用 ad-hoc 签名，未经 Apple 公证。
+2. 在“环境配置 → 网络”预览并应用：51 条全局分流、Cloudflare DoH、跨订阅自动补建安装时的同名代理组、浏览器专用 HTTP 入口。新建组初始为 REJECT，需手动选择节点。原有普通流量仍按国内直连规则分流；专用入口 `127.0.0.1:7898` 的请求统一交给代理组。
+3. 在“系统”按实际出口设置时区和地区，或应用既有目标并修复。软件不会修改 GPU、字体或伪造浏览器版本，也不保证第三方检测页面全部通过。
+4. 在“指纹浏览器”连接本机 AdsPower Local API，选择已关闭环境并配置代理；仅在能够读回原值时自动设置 WebRTC，否则显示手动步骤。API 权限或版本不支持时，界面提供手动配置参数。
+
+每项修改都有验证与恢复边界；成功保存不代表完成浏览器泄漏审计。新配置功能仅在 macOS App 提供。仓库与安装包不含个人账号、节点、订阅或 API 密钥。
+
+## 独立分流规则
+
+供 Clash Verge / Mihomo 复用的规则：**Claude 和 IP 检测优先代理，国内及局域网直连，其余流量代理**。默认开启常见 STUN UDP 端口阻断。
 
 ## 规则顺序
 
@@ -16,7 +31,7 @@
 
 共 51 条顶层规则，国内域名/IP 由已有地理数据库展开。**请保持规则模式**；全局模式绕过这张表，国内也会代理，STUN 拒绝规则也不执行。
 
-## 在另一台设备复用
+## 单独使用规则（不安装切换器）
 
 1. 先在 Clash Verge 导入自己的订阅，确认代理节点可用；按设备需要开启 TUN。仓库里的文件不含节点、订阅地址或凭据。
 2. 确认目标代理组名称，默认是 `🤖 Claude`，并让该组选择实际代理节点。没有这个组时，用已有代理组名称生成：
@@ -61,8 +76,15 @@ Clash 按请求的目标域名/IP 分流，不能仅因请求来自 IP 检测网
 
 ## macOS 持续监控与通知
 
-[完整 ClaudeSwitcher 定制源码](claude-switcher/README.md)（`1.8.0-rc1.local3`）已补齐 VPN、节点及出口 IP 变化监控，并发送原生系统通知。保护对象是 `/Applications/Claude.app` 桌面版，未增加 Claude Code CLI 进程管理。
+[完整 ClaudeSwitcher 定制源码](claude-switcher/README.md)（`1.9.0`）已补齐 VPN、节点及出口 IP 变化监控，并发送原生系统通知。保护对象是 `/Applications/Claude.app` 桌面版，未增加 Claude Code CLI 进程管理。
 
 节点/VPN 每秒巡检；出口 IP 每 5 秒经明确代理探测，连续 20 秒无有效结果则停止桌面版 Claude。通知与进程停止分离，通知权限关闭不影响守护执行；停止失败会重试并拒绝恢复就绪。监控不会自动启动 Claude。
 
 参见 [监控机制与安装说明](claude-switcher/docs/network/MONITOR.md)、[实际验收结果](docs/VERIFICATION.md) 和 [脱敏监控证据](docs/monitor-evidence.json)。原 51 条国内直连分流表保持不变。
+
+
+## 开源与来源
+
+本项目基于 [YOURSJEYO/claude-switcher](https://github.com/YOURSJEYO/claude-switcher) 修改，保留其 MIT 许可与归属。当前仓库包含分流规则、完整应用源码、测试和构建工作流；上游历史说明与本仓库发布记录分开保留。详见 [LICENSE](LICENSE) 与 [第三方规则来源](docs/SOURCES.md)。
+
+[1.9.0 验证说明](docs/RELEASE-1.9.0.md) 区分自动化测试、原生构建、配置校验与实际联调范围。

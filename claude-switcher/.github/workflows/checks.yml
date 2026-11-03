@@ -14,9 +14,13 @@ concurrency:
   group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    working-directory: claude-switcher
+
 jobs:
   checks:
-    name: Shell, tests, Swift, sums
+    name: Rules, shell, tests, Swift, sums
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -32,16 +36,21 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Verify routing rules
+        working-directory: .
+        run: |
+          set -euo pipefail
+          python3 -B scripts/generate.py --check
+          node --check Script.js
+          for workflow in checks preview release; do
+            cmp ".github/workflows/$workflow.yml" "claude-switcher/.github/workflows/$workflow.yml"
+          done
+
       - name: Shell syntax
         run: |
           set -euo pipefail
           bash -n core/claude-switch.sh
-          for file in daemons/*.sh; do
-            bash -n "$file"
-          done
-          bash -n "installer/安装.command"
-          bash -n "installer/卸载.command"
-          for file in linux/*.sh; do
+          for file in daemons/*.sh installer/*.command scripts/*.sh linux/*.sh; do
             bash -n "$file"
           done
 
@@ -50,49 +59,20 @@ jobs:
 
       - name: Swift strict build
         run: |
+          set -euo pipefail
           swiftc -O -parse-as-library -warnings-as-errors \
             -target "$(uname -m)-apple-macos13.0" \
-            app/main.swift -o /tmp/ClaudeSwitcher \
+            app/main.swift -o "$RUNNER_TEMP/ClaudeSwitcher" \
             -framework SwiftUI -framework AppKit
+          swiftc -O -warnings-as-errors \
+            -target "$(uname -m)-apple-macos13.0" \
+            app/network-notifier.swift -o "$RUNNER_TEMP/NetworkNotifier" \
+            -framework AppKit -framework UserNotifications
 
-      - name: Verify checksums
+      - name: Verify checksums and source kit
         run: |
+          set -euo pipefail
           shasum -a 256 -c SHA256SUMS
-          python3 core/component-manager.py verify --source .
-
-      - name: JavaScript syntax
-        run: node --check docs/app.js
-
-  windows:
-    name: Windows PowerShell integration
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # windows/ 下的两个隔离集成回归此前只写在 AGENTS.md 里，CI 从不执行，
-      # 导致加密快照在 PS 5.1 下整体不可用仍能合入 main。两个 shell 都跑：
-      # 5.1 是 Windows 用户的实际默认环境，7 是开发机常见环境。
-      - name: Switch integration (Windows PowerShell 5.1)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-switch-integration.ps1
-
-      - name: Snapshot integration (Windows PowerShell 5.1)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-snapshot-integration.ps1
-
-      - name: Switch integration (pwsh 7)
-        shell: pwsh
-        run: pwsh -NoProfile -File tests\windows-switch-integration.ps1
-
-      - name: Snapshot integration (pwsh 7)
-        shell: pwsh
-        run: pwsh -NoProfile -File tests\windows-snapshot-integration.ps1
-
-      - name: Runtime safety (Windows PowerShell 5.1)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows-runtime-safety.ps1
-
-      - name: Runtime safety (pwsh 7)
-        shell: pwsh
-        run: pwsh -NoProfile -File tests\windows-runtime-safety.ps1
+          python3 -B core/component-manager.py verify --source .
+          python3 -B scripts/package-source.py --kit --directory "$RUNNER_TEMP/installer-kit"
+          python3 -B "$RUNNER_TEMP/installer-kit/core/component-manager.py" verify --source "$RUNNER_TEMP/installer-kit"

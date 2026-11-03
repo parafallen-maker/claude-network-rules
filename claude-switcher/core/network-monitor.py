@@ -289,9 +289,12 @@ def stop_claude(uid):
 def publish_event(uid, kind, stopped, failed):
     if kind not in KINDS:
         raise ValueError('invalid event kind')
-    event = {'id': uuid.uuid4().hex, 'time': time.time(), 'kind': kind,
-             'claude_stopped': stopped, 'stop_failed': failed}
-    write_root_json(RUNTIME / ('events-%d.json' % uid), {'schema': 1, 'latest': event}, 0o644)
+    # Idle network changes remain in the log/status, not in the notification
+    # queue. Inspection/stop failures still need attention: absence is unknown.
+    if stopped or failed:
+        event = {'id': uuid.uuid4().hex, 'time': time.time(), 'kind': kind,
+                 'claude_stopped': stopped, 'stop_failed': failed}
+        write_root_json(RUNTIME / ('events-%d.json' % uid), {'schema': 1, 'latest': event}, 0o644)
     subprocess.run(['/usr/bin/logger', '-t', 'claude-switcher',
                     'Network monitor event: ' + kind + '; stopped=' + str(stopped) + '; stop_failed=' + str(failed)],
                    capture_output=True, timeout=1)
@@ -340,7 +343,7 @@ def run_monitor(args):
         stopped, failed = stop_claude(args.owner_uid)
         stop_pending = failed
         publish_event(args.owner_uid, kind, stopped, failed)
-        pending_initial_stop = True
+        pending_initial_stop = stopped or failed
 
     try:
         while True:
@@ -370,6 +373,10 @@ def run_monitor(args):
                 if (stopped or failed) and not pending_initial_stop:
                     publish_event(args.owner_uid, state.fault or 'monitor_unavailable', stopped, failed)
                     pending_initial_stop = True
+                elif not stopped and not failed:
+                    # A quiet fault must not suppress a later real stop if the
+                    # user opens Claude before network protection is restored.
+                    pending_initial_stop = False
             else:
                 pending_initial_stop = False
             if snapshot.get('ok') and future is None and time.monotonic() >= next_probe:

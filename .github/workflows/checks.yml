@@ -1,0 +1,78 @@
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: claude-switcher
+
+jobs:
+  checks:
+    name: Rules, shell, tests, Swift, sums
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Verify routing rules
+        working-directory: .
+        run: |
+          set -euo pipefail
+          python3 -B scripts/generate.py --check
+          node --check Script.js
+          for workflow in checks preview release; do
+            cmp ".github/workflows/$workflow.yml" "claude-switcher/.github/workflows/$workflow.yml"
+          done
+
+      - name: Shell syntax
+        run: |
+          set -euo pipefail
+          bash -n core/claude-switch.sh
+          for file in daemons/*.sh installer/*.command scripts/*.sh linux/*.sh; do
+            bash -n "$file"
+          done
+
+      - name: Python tests
+        run: python3 -B -m unittest discover -s tests -v
+
+      - name: Swift strict build
+        run: |
+          set -euo pipefail
+          swiftc -O -parse-as-library -warnings-as-errors \
+            -target "$(uname -m)-apple-macos13.0" \
+            app/main.swift -o "$RUNNER_TEMP/ClaudeSwitcher" \
+            -framework SwiftUI -framework AppKit
+          swiftc -O -warnings-as-errors \
+            -target "$(uname -m)-apple-macos13.0" \
+            app/network-notifier.swift -o "$RUNNER_TEMP/NetworkNotifier" \
+            -framework AppKit -framework UserNotifications
+
+      - name: Verify checksums and source kit
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c SHA256SUMS
+          python3 -B core/component-manager.py verify --source .
+          python3 -B scripts/package-source.py --kit --directory "$RUNNER_TEMP/installer-kit"
+          python3 -B "$RUNNER_TEMP/installer-kit/core/component-manager.py" verify --source "$RUNNER_TEMP/installer-kit"

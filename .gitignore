@@ -10,3 +10,5 @@ config.yaml
 clash-verge.yaml
 profiles/
 *.log
+
+build/

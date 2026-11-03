@@ -26,7 +26,8 @@ import urllib.request
 import uuid
 import zipfile
 
-REPOSITORY = "YOURSJEYO/claude-switcher"
+REPOSITORY = "parafallen-maker/claude-network-rules"
+SOURCE_SUBDIR = "claude-switcher"
 CONFIG_KEYS = ("PROXY_MODE", "PROXY_GROUP", "COUNTRY_TARGET", "TZ_TARGET", "LOCALE_TARGET")
 CHECKS = ("代理内核", "TUN网卡", "出口IP", "IP一致", "时区", "地区", "IPv6", "DNS",
           "WebRTC", "保镖", "规则置顶", "客户端语言", "ASN属性", "生态可达性")
@@ -400,23 +401,49 @@ def resolve_revision(track):
 
 
 def download_bundle(revision, work):
+    if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision):
+        raise ComponentError("下载必须使用已固定的提交")
+    source_subdir = safe_relative(SOURCE_SUBDIR)
     archive = Path(work) / "source.zip"
     archive.write_bytes(fetch("https://codeload.github.com/" + REPOSITORY + "/zip/" + revision))
-    manifest_bytes = fetch("https://raw.githubusercontent.com/" + REPOSITORY + "/" + revision + "/COMPONENTS.json", 1024 * 1024)
+    manifest_bytes = fetch("https://raw.githubusercontent.com/" + REPOSITORY + "/" + revision
+                           + "/" + source_subdir.as_posix() + "/COMPONENTS.json", 1024 * 1024)
     total = 0
     extract = Path(work) / "source"
     with zipfile.ZipFile(archive) as z:
         if len(z.infolist()) > 5000:
             raise ComponentError("安装包文件数量异常")
+        members = {}
+        roots = set()
+        # Validate the whole repository archive, including siblings of the app.
+        # Never allow an untrusted sibling to escape or shadow the selected tree.
         for info in z.infolist():
             relative = info.filename.rstrip("/")
-            safe_relative(relative)
+            path = safe_relative(relative)
+            if info.orig_filename != info.filename or relative in members:
+                raise ComponentError("安装包包含重复或无效路径")
             mode = info.external_attr >> 16
-            if stat.S_ISLNK(mode):
-                raise ComponentError("安装包包含符号链接")
+            kind = stat.S_IFMT(mode)
+            if kind not in (0, stat.S_IFREG, stat.S_IFDIR) or (kind == stat.S_IFDIR and not info.is_dir()):
+                raise ComponentError("安装包包含符号链接或特殊文件")
+            if info.flag_bits & 1:
+                raise ComponentError("安装包包含加密文件")
             total += info.file_size
             if total > MAX_ARCHIVE:
                 raise ComponentError("安装包展开体积过大")
+            roots.add(path.parts[0])
+            members[relative] = info
+        if len(roots) != 1:
+            raise ComponentError("安装包必须只有一个仓库根目录")
+        for relative in members:
+            for parent in PurePosixPath(relative).parents:
+                if str(parent) in members and not members[str(parent)].is_dir():
+                    raise ComponentError("安装包文件与目录路径冲突")
+        try:
+            extract.mkdir(mode=0o700)
+        except FileExistsError:
+            raise ComponentError("解压目录已存在，已停止以避免覆盖") from None
+        for relative, info in members.items():
             destination = extract / relative
             if info.is_dir():
                 destination.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -424,11 +451,11 @@ def download_bundle(revision, work):
                 destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 with z.open(info) as source, destination.open("wb") as target:
                     shutil.copyfileobj(source, target)
-    roots = list(extract.iterdir())
-    if len(roots) != 1 or not roots[0].is_dir() or (roots[0] / "COMPONENTS.json").read_bytes() != manifest_bytes:
+    root = extract / next(iter(roots)) / source_subdir
+    if not root.is_dir() or not (root / "COMPONENTS.json").is_file() or (root / "COMPONENTS.json").read_bytes() != manifest_bytes:
         raise ComponentError("固定提交与组件清单不一致")
-    load_bundle(roots[0])
-    return roots[0]
+    load_bundle(root)
+    return root
 
 
 def run_update(args):

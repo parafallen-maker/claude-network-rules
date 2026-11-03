@@ -3,6 +3,12 @@
 cd "$(dirname "$0")"
 REPO="$(cd .. && pwd)"
 H="$HOME"
+PREBUILT_APP=""
+case "$REPO" in
+    *.app/Contents/Resources/InstallerSource)
+        PREBUILT_APP="${REPO%/Contents/Resources/InstallerSource}"
+        ;;
+esac
 clear
 echo "=================================="
 echo "  Claude 账号切换器 · 安装程序"
@@ -175,13 +181,17 @@ if ! python3 --version >/dev/null 2>&1; then
     echo "⚠️  未检测到 python3,请先安装 Xcode 命令行工具: xcode-select --install"
     read -n 1 -s -r -p "按任意键退出..."; exit 1
 fi
-if ! command -v swiftc >/dev/null 2>&1; then
+if [ -z "$PREBUILT_APP" ] && ! command -v swiftc >/dev/null 2>&1; then
     echo "⚠️  未检测到 swiftc(界面 App 需要现场编译),请先运行: xcode-select --install"
     echo "   注意:macOS 26/27 上仅装 Command Line Tools 可能因缺少 SwiftUIMacros 插件编译失败,"
     echo "   如遇失败请安装完整 Xcode 并执行: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
     read -n 1 -s -r -p "按任意键退出..."; exit 1
 fi
-echo "✓ 前置检查通过($MODE / Claude / python3 / swiftc)"
+if [ -n "$PREBUILT_APP" ]; then
+    echo "✓ 前置检查通过($MODE / Claude / python3 / 预编译 App)"
+else
+    echo "✓ 前置检查通过($MODE / Claude / python3 / swiftc)"
+fi
 
 # ---- 1. 自动探测代理组名(仅 Clash Verge;多个 select 组时让用户选,避免静默选错专线) ----
 GRP=""
@@ -279,6 +289,11 @@ if [ -t 0 ] && [ "$#" -eq 0 ]; then
         case "$choice" in y|Y) OPTIONS+=(--configure-proxy) ;; esac
     fi
 fi
-exec python3 "$REPO/installer/install.py" install --source "$REPO" --home "$H" \
+if [ -n "$PREBUILT_APP" ]; then
+    # The transaction installer verifies the signature, architecture, version
+    # and complete embedded component manifest before copying this App.
+    OPTIONS+=(--prebuilt-app "$PREBUILT_APP")
+fi
+exec python3 -B "$REPO/installer/install.py" install --source "$REPO" --home "$H" \
     --proxy-mode "$MODE" --proxy-group "${GRP:-GLOBAL}" --country "$CTRY" \
     --timezone "$TZV" --locale "$LOCALE" "${OPTIONS[@]}"

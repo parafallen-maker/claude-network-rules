@@ -1,101 +1,69 @@
 #!/bin/bash
-# Claude 切换器 - macOS 打包脚本（本地与 CI 共用）
-# 用法: bash scripts/package-macos.sh [版本号]
-# 产物: build/ClaudeSwitcher-<版本>-macos-<架构>.zip
-#       build/ClaudeSwitcher-<版本>-macos-<架构>.dmg
-#       build/ClaudeSwitcher-<版本>-installer-kit.zip
+# Build a complete macOS App with verified first-install resources.
+# Usage: CLAUDE_SWITCHER_BUILD_ARCH=universal bash scripts/package-macos.sh [version]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-
 VERSION="${1:-$(cat "$ROOT/VERSION")}"
-PLIST_VERSION="${VERSION%%-*}"
-if [ "$VERSION" != "$(cat "$ROOT/VERSION")" ]; then echo "VERSION 与组件清单版本不一致，请先更新 VERSION 并运行 scripts/gen-sums.sh" >&2; exit 1; fi
-python3 "$ROOT/core/component-manager.py" verify --source "$ROOT"
+if [ "$VERSION" != "$(cat "$ROOT/VERSION")" ]; then
+    echo "VERSION 与组件清单版本不一致，请先更新 VERSION 并运行 scripts/gen-sums.sh" >&2
+    exit 1
+fi
 case "$VERSION" in
-    ''|*[!0-9A-Za-z._-]*)
-        echo "✗ 版本号只能包含字母、数字、点、下划线和连字符: $VERSION" >&2
-        exit 1
-        ;;
+    ''|*[!0-9A-Za-z._-]*) echo "版本号只能包含字母、数字、点、下划线和连字符" >&2; exit 1 ;;
 esac
+python3 -B "$ROOT/core/component-manager.py" verify --source "$ROOT"
 
 APP_NAME="Claude切换器"
 BUILD="$ROOT/build"
 APP="$BUILD/$APP_NAME.app"
 ARCH="${CLAUDE_SWITCHER_BUILD_ARCH:-$(uname -m)}"
 case "$ARCH" in
-    arm64)  ARCH_LABEL="arm64" ;;
-    x86_64) ARCH_LABEL="x86_64" ;;
-    universal) ARCH_LABEL="universal" ;;
+    arm64|x86_64|universal) ;;
     *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
-ZIP="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH_LABEL-app-only.zip"
-DMG="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH_LABEL-app-only.dmg"
-KIT_NAME="ClaudeSwitcher-$VERSION"
+ZIP="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH.zip"
+DMG="$BUILD/ClaudeSwitcher-$VERSION-macos-$ARCH.dmg"
 KIT_ZIP="$BUILD/ClaudeSwitcher-$VERSION-installer-kit.zip"
-
+SOURCE_ZIP="$BUILD/ClaudeSwitcher-$VERSION-source.zip"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/claude-switcher-package.XXXXXX")"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
-
 mkdir -p "$BUILD"
-rm -rf "$APP" "$ZIP" "$DMG" "$KIT_ZIP"
+rm -rf "$APP" "$ZIP" "$DMG" "$KIT_ZIP" "$SOURCE_ZIP"
 
-echo "==> 编译 $APP_NAME $VERSION ($ARCH_LABEL)"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-compile_arch() {
-    xcrun swiftc -O -parse-as-library -warnings-as-errors \
-        -target "$1-apple-macos13.0" "$ROOT/app/main.swift" -o "$2" \
-        -framework SwiftUI -framework AppKit
-}
-if [ "$ARCH" = "universal" ]; then
-    compile_arch arm64 "$WORK/ClaudeSwitcher-arm64"
-    compile_arch x86_64 "$WORK/ClaudeSwitcher-x86_64"
-    lipo -create "$WORK/ClaudeSwitcher-arm64" "$WORK/ClaudeSwitcher-x86_64" -output "$APP/Contents/MacOS/ClaudeSwitcher"
-else
-    compile_arch "$ARCH" "$APP/Contents/MacOS/ClaudeSwitcher"
-fi
+echo "==> 编译完整 App $VERSION ($ARCH)"
+python3 -B - "$ROOT" "$APP" "$VERSION" "$ARCH" <<'PY_BUILD'
+import importlib.util
+from pathlib import Path
+import sys
+root, output = map(Path, sys.argv[1:3])
+spec = importlib.util.spec_from_file_location("installer", root / "installer/install.py")
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+installer.compile_app(root, output, sys.argv[3], arch=sys.argv[4])
+PY_BUILD
 
-echo "==> 生成图标"
-ICONSET="$WORK/AppIcon.iconset"
-mkdir -p "$ICONSET"
-for SZ in 16 32 128 256 512; do
-    sips -z "$SZ" "$SZ" "$ROOT/assets/icon-2048.png" \
-        --out "$ICONSET/icon_${SZ}x${SZ}.png" >/dev/null
-    sips -z $((SZ * 2)) $((SZ * 2)) "$ROOT/assets/icon-2048.png" \
-        --out "$ICONSET/icon_${SZ}x${SZ}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+echo "==> 内置已校验的首次安装组件"
+python3 -B "$ROOT/scripts/package-source.py" --kit --directory "$APP/Contents/Resources/InstallerSource"
+python3 -B - "$ROOT" "$APP" "$VERSION" <<'PY_INFO'
+import hashlib, json, sys
+from pathlib import Path
+root, app = map(Path, sys.argv[1:3])
+info = {"version": sys.argv[3], "components_sha256": hashlib.sha256((root / "COMPONENTS.json").read_bytes()).hexdigest()}
+(app / "Contents/Resources/BuildInfo.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+PY_INFO
 
-echo "==> 写入 Info.plist"
-cat > "$APP/Contents/Info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>CFBundleExecutable</key><string>ClaudeSwitcher</string>
-	<key>CFBundleIdentifier</key><string>local.claude-switcher</string>
-	<key>CFBundleName</key><string>Claude切换器</string>
-	<key>CFBundleDisplayName</key><string>Claude切换器</string>
-	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>$PLIST_VERSION</string>
-	<key>CFBundleVersion</key><string>$PLIST_VERSION</string>
-	<key>ClaudeSwitcherVersion</key><string>$VERSION</string>
-	<key>LSMinimumSystemVersion</key><string>13.0</string>
-	<key>CFBundleIconFile</key><string>AppIcon</string>
-	<key>NSHighResolutionCapable</key><true/>
-	<key>LSUIElement</key><true/>
-</dict>
-</plist>
-EOF
-plutil -lint "$APP/Contents/Info.plist" >/dev/null
-
+# Re-sign inside out after embedding resources. Both binaries must use the
+# configured identity; an ad-hoc nested helper cannot be notarized later.
 IDENTITY="${CLAUDE_SWITCHER_SIGN_IDENTITY:--}"
-SIGN_ARGS=(--force --deep -s "$IDENTITY")
+SIGN_ARGS=(--force -s "$IDENTITY")
 if [ "$IDENTITY" != "-" ]; then SIGN_ARGS+=(--options runtime --timestamp); fi
+codesign "${SIGN_ARGS[@]}" "$APP/Contents/Helpers/NetworkNotifier.app"
 codesign "${SIGN_ARGS[@]}" "$APP"
 codesign --verify --deep --strict "$APP"
+plutil -lint "$APP/Contents/Info.plist" >/dev/null
 echo "✓ 签名与结构校验通过（未配置 NOTARY_PROFILE 时未经公证）"
 if [ -n "${CLAUDE_SWITCHER_NOTARY_PROFILE:-}" ]; then
     [ "$IDENTITY" != "-" ] || { echo "公证必须使用 Developer ID 签名" >&2; exit 1; }
@@ -107,54 +75,38 @@ fi
 
 NOTE="$WORK/安装说明.txt"
 cat > "$NOTE" <<'NOTE_EOF'
-这是仅包含 macOS 界面 App 的安装包，不含核心脚本与守护进程。
+此 App 已包含核心组件、守护进程安装器和网络通知助手。
 
-首次使用请下载 installer-kit.zip，解压后双击 installer/安装.command。
-若已安装过核心脚本，可把本 App 拖入「应用程序」覆盖旧版界面。
+1. 将 Claude切换器.app 拖入「应用程序」，然后打开。
+2. 首次使用点击「安装本机组件」，按终端引导确认代理与地区并授权安装。
+3. 安装过程验证预编译 App 和内置组件，完成检查后才提交；失败保留或恢复旧版本。
 
-未安装核心脚本时，App 会提示「还差一步：安装核心脚本」并提供下载入口。
+预编译 App 安装需要 Python 3，不需要重新编译 Swift。
+源码/installer-kit 安装需要 Apple 命令行开发工具、Swift 与 Python 3。
+默认发布包使用 ad-hoc 签名，未经 Apple 公证；首次打开可能被 macOS 拦截。
+账号目录、代理凭据和浏览器资料不会随 App 分发。
 NOTE_EOF
 
-echo "==> 生成 macOS zip(app-only)"
+echo "==> 生成完整 macOS ZIP"
 APP_STAGE="$WORK/appstage"
 mkdir -p "$APP_STAGE"
 ditto "$APP" "$APP_STAGE/$APP_NAME.app"
 cp "$NOTE" "$APP_STAGE/安装说明.txt"
 ditto -c -k --norsrc --noextattr "$APP_STAGE" "$ZIP"
 
-echo "==> 生成 DMG(app-only)"
+echo "==> 生成完整 macOS DMG"
 DMG_STAGE="$WORK/dmg"
 mkdir -p "$DMG_STAGE"
 ditto "$APP" "$DMG_STAGE/$APP_NAME.app"
 cp "$NOTE" "$DMG_STAGE/安装说明.txt"
 ln -s /Applications "$DMG_STAGE/Applications"
-hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_STAGE" \
-    -ov -format UDZO "$DMG" >/dev/null
+hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG" >/dev/null
 
-echo "==> 生成 installer kit"
-KIT_ROOT="$WORK/$KIT_NAME"
-mkdir -p "$KIT_ROOT"
-python3 - "$ROOT" "$KIT_ROOT" <<'PY_KIT'
-from pathlib import Path
-import json, shutil, sys
-root, kit = map(Path, sys.argv[1:])
-manifest = json.loads((root / 'COMPONENTS.json').read_text())
-paths = list(manifest['files']) + ['COMPONENTS.json', 'SHA256SUMS', 'README.md', 'README.en.md', 'AGENTS.md', 'SECURITY.md']
-paths += [p.relative_to(root).as_posix() for p in (root / 'docs').rglob('*') if p.is_file() and p.suffix in ('.md', '.json')]
-for relative in paths:
-    src, dst = root / relative, kit / relative
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-PY_KIT
-chmod +x "$KIT_ROOT/installer/安装.command" "$KIT_ROOT/installer/卸载.command"
-python3 "$KIT_ROOT/core/component-manager.py" verify --source "$KIT_ROOT"
-ditto -c -k --keepParent --norsrc --noextattr "$KIT_ROOT" "$KIT_ZIP"
-
-echo ""
-SOURCE_ZIP="$BUILD/ClaudeSwitcher-$VERSION-source.zip"
-python3 "$ROOT/scripts/package-source.py" --output "$SOURCE_ZIP"
+echo "==> 生成源码与 installer kit"
+python3 -B "$ROOT/scripts/package-source.py" --kit --output "$KIT_ZIP"
+python3 -B "$ROOT/scripts/package-source.py" --output "$SOURCE_ZIP"
 echo "✓ 打包完成:"
 for FILE in "$ZIP" "$DMG" "$KIT_ZIP" "$SOURCE_ZIP"; do
-    [ -f "$FILE" ] || { echo "✗ 缺少产物 $FILE" >&2; exit 1; }
+    [ -f "$FILE" ] || { echo "缺少产物 $FILE" >&2; exit 1; }
     printf '  %-58s %8s\n' "$(basename "$FILE")" "$(du -h "$FILE" | cut -f1)"
 done
